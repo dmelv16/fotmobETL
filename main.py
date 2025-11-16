@@ -133,7 +133,7 @@ def process_match_selective(conn, match_id: int, raw_json: str, json_structure: 
     # Process match details if available
     if json_structure.get('has_match_details'):
         try:
-            from extract_match_details import process_match_details
+            from matchDetails import process_match_details
             # Pass connection string instead of connection to avoid issues
             result = run_extraction_safe('match_details', 'process_single_match', 
                                         conn, match_id, raw_json)
