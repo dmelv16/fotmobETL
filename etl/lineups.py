@@ -3,6 +3,121 @@ import pyodbc
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+def process_single_match(conn, match_id: int, raw_json: str) -> bool:
+    """Process a single match's lineup data."""
+    try:
+        # Create tables if they don't exist
+        create_lineup_tables(conn)
+        
+        cursor = conn.cursor()
+        
+        # Check if already processed
+        cursor.execute("SELECT match_id FROM [dbo].[match_lineups] WHERE match_id = ?", match_id)
+        if cursor.fetchone():
+            return True  # Already processed
+        
+        # Parse the data
+        parsed = parse_lineup_data(raw_json)
+        
+        if not parsed['players']:  # Skip if no lineup data
+            return False
+        
+        # Insert lineup record
+        cursor.execute("""
+            INSERT INTO [dbo].[match_lineups] (
+                match_id, lineup_type, source, available_filters
+            ) VALUES (?, ?, ?, ?)
+        """, parsed['match_id'], parsed['lineup_type'], parsed['source'],
+             ','.join(parsed.get('available_filters', [])) if parsed.get('available_filters') else None)
+        
+        # Insert team stats
+        if parsed.get('home_team_stats'):
+            stats = parsed['home_team_stats']
+            cursor.execute("""
+                INSERT INTO [dbo].[match_team_stats] (
+                    match_id, team_id, team_name, formation, rating,
+                    average_starter_age, total_starter_market_value, is_home_team
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, parsed['match_id'], stats['team_id'], stats['team_name'], stats['formation'],
+                 stats['rating'], stats['average_starter_age'], stats['total_starter_market_value'],
+                 stats['is_home'])
+        
+        if parsed.get('away_team_stats'):
+            stats = parsed['away_team_stats']
+            cursor.execute("""
+                INSERT INTO [dbo].[match_team_stats] (
+                    match_id, team_id, team_name, formation, rating,
+                    average_starter_age, total_starter_market_value, is_home_team
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, parsed['match_id'], stats['team_id'], stats['team_name'], stats['formation'],
+                 stats['rating'], stats['average_starter_age'], stats['total_starter_market_value'],
+                 stats['is_home'])
+        
+        # Insert players
+        for player in parsed['players']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_lineup_players] (
+                    match_id, team_id, player_id, player_name, first_name, last_name,
+                    short_name, age, position_id, usual_position_id, shirt_number, is_captain,
+                    is_home_team, is_starter, formation, country_name, country_code,
+                    market_value, rating, fantasy_score, player_of_match,
+                    h_layout_x, h_layout_y, h_layout_width, h_layout_height,
+                    v_layout_x, v_layout_y, v_layout_width, v_layout_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, player['match_id'], player['team_id'], player['player_id'], player['player_name'],
+                 player['first_name'], player['last_name'], player['short_name'], player['age'],
+                 player['position_id'], player['usual_position_id'], player['shirt_number'],
+                 player['is_captain'], player['is_home_team'], player['is_starter'], player['formation'],
+                 player['country_name'], player['country_code'], player['market_value'], player['rating'],
+                 player['fantasy_score'], player['player_of_match'], player['h_layout_x'],
+                 player['h_layout_y'], player['h_layout_width'], player['h_layout_height'],
+                 player['v_layout_x'], player['v_layout_y'], player['v_layout_width'], player['v_layout_height'])
+            
+            # Insert substitutions
+            for sub in player['substitutions']:
+                cursor.execute("""
+                    INSERT INTO [dbo].[match_substitutions] (
+                        match_id, player_id, player_name, team_id, substitution_time,
+                        substitution_type, substitution_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, player['match_id'], player['player_id'], player['player_name'],
+                     player['team_id'], sub['time'], sub['type'], sub['reason'])
+        
+        # Insert coaches
+        for coach in parsed['coaches']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_coaches] (
+                    match_id, team_id, coach_id, coach_name, first_name, last_name,
+                    age, is_home_team, country_name, country_code, primary_team_id,
+                    primary_team_name, usual_position_id, is_coach
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, coach['match_id'], coach['team_id'], coach['coach_id'], coach['coach_name'],
+                 coach['first_name'], coach['last_name'], coach['age'], coach['is_home_team'],
+                 coach['country_name'], coach['country_code'], coach['primary_team_id'],
+                 coach['primary_team_name'], coach['usual_position_id'], coach['is_coach'])
+        
+        # Insert unavailable players
+        for unavailable in parsed['unavailable']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_unavailable_players] (
+                    match_id, team_id, player_id, player_name, first_name, last_name,
+                    age, country_name, country_code, market_value, is_home_team,
+                    injury_id, unavailability_type, expected_return
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, unavailable['match_id'], unavailable['team_id'], unavailable['player_id'],
+                 unavailable['player_name'], unavailable['first_name'], unavailable['last_name'],
+                 unavailable['age'], unavailable['country_name'], unavailable['country_code'],
+                 unavailable['market_value'], unavailable['is_home_team'], unavailable['injury_id'],
+                 unavailable['unavailability_type'], unavailable['expected_return'])
+        
+        conn.commit()
+        return True
+        
+    except Exception as e:
+        print(f"Error in process_single_match for match {match_id}: {e}")
+        conn.rollback()
+        return False
+    
 def parse_lineup_data(raw_json: str) -> Dict[str, Any]:
     """Parse lineup data from raw JSON string."""
     data = json.loads(raw_json)

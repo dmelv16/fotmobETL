@@ -109,23 +109,6 @@ def analyze_json_structure(raw_json: str, match_id: int) -> Dict[str, bool]:
         return {k: False for k in ['has_match_details', 'has_lineups', 'has_stats', 
                                    'has_momentum', 'has_player_stats', 'has_shotmap', 'has_events']}
 
-def run_extraction_safe(module_name: str, func_name: str, *args):
-    """Safely run an extraction function from a module."""
-    try:
-        # Dynamically import and run the function
-        module = __import__(f'extract_{module_name}')
-        func = getattr(module, func_name)
-        return func(*args)
-    except ModuleNotFoundError:
-        logging.warning(f"Module extract_{module_name} not found")
-        return False
-    except AttributeError:
-        logging.warning(f"Function {func_name} not found in extract_{module_name}")
-        return False
-    except Exception as e:
-        logging.error(f"Error in {module_name}.{func_name}: {str(e)}")
-        return False
-
 def process_match_selective(conn, match_id: int, raw_json: str, json_structure: Dict) -> Dict[str, bool]:
     """Process only the data types that exist in the JSON."""
     results = {}
@@ -133,57 +116,61 @@ def process_match_selective(conn, match_id: int, raw_json: str, json_structure: 
     # Process match details if available
     if json_structure.get('has_match_details'):
         try:
-            from matchDetails import process_match_details
-            # Pass connection string instead of connection to avoid issues
-            result = run_extraction_safe('match_details', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from matchDetails import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['match_details'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing match_details for {match_id}: {e}")
             results['match_details'] = False
     
     # Process lineups if available
     if json_structure.get('has_lineups'):
         try:
-            result = run_extraction_safe('lineups', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from lineups import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['lineups'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing lineups for {match_id}: {e}")
             results['lineups'] = False
     
     # Process stats if available
     if json_structure.get('has_stats'):
         try:
-            result = run_extraction_safe('stats', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from matchStats import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['stats'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing stats for {match_id}: {e}")
             results['stats'] = False
     
     # Process momentum if available
     if json_structure.get('has_momentum'):
         try:
-            result = run_extraction_safe('momentum', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from momentum import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['momentum'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing momentum for {match_id}: {e}")
             results['momentum'] = False
     
     # Process player stats if available
     if json_structure.get('has_player_stats'):
         try:
-            result = run_extraction_safe('player_stats', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from playerStats import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['player_stats'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing player_stats for {match_id}: {e}")
             results['player_stats'] = False
     
     # Process shotmap if available
     if json_structure.get('has_shotmap'):
         try:
-            result = run_extraction_safe('shotmap', 'process_single_match', 
-                                        conn, match_id, raw_json)
+            from shotMap import process_single_match
+            result = process_single_match(conn, match_id, raw_json)
             results['shotmap'] = result
-        except:
+        except Exception as e:
+            logging.error(f"Error processing shotmap for {match_id}: {e}")
             results['shotmap'] = False
     
     return results
@@ -249,13 +236,14 @@ def main(connection_string: str, batch_size: int = 100):
     logging.info("Creating tracking tables...")
     create_tracking_tables(conn)
     
-    # Get matches to process
+    # Get matches to process - either not in extraction_status OR has incomplete data
     cursor = conn.cursor()
     cursor.execute("""
         SELECT f.id, f.match_id, f.league_id, f.league_name, f.season_year, f.raw_json
         FROM [dbo].[fotmob_raw_data] f
         LEFT JOIN [dbo].[extraction_status] e ON f.match_id = e.match_id
-        WHERE f.data_type = 'match_details' AND e.match_id IS NULL
+        WHERE f.data_type = 'match_details' 
+        AND (e.match_id IS NULL OR e.has_match_details = 0)
         ORDER BY f.league_id, f.season_year, f.match_id
     """)
     
@@ -293,20 +281,46 @@ def main(connection_string: str, batch_size: int = 100):
             # Process only the data that exists
             results = process_match_selective(conn, match_id, raw_json, json_structure)
             
-            # Record extraction status
-            cursor.execute("""
-                INSERT INTO [dbo].[extraction_status] 
-                (match_id, league_id, season_year, has_match_details, has_lineups, 
-                 has_stats, has_momentum, has_player_stats, has_shotmap, has_events)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, match_id, league_id, season_year,
-                 json_structure.get('has_match_details', False),
-                 json_structure.get('has_lineups', False),
-                 json_structure.get('has_stats', False),
-                 json_structure.get('has_momentum', False),
-                 json_structure.get('has_player_stats', False),
-                 json_structure.get('has_shotmap', False),
-                 json_structure.get('has_events', False))
+            # Update extraction status based on what was actually processed
+            # Check if record exists
+            cursor.execute("SELECT id FROM [dbo].[extraction_status] WHERE match_id = ?", match_id)
+            exists = cursor.fetchone()
+            
+            if exists:
+                # Update existing record - set flags to 1 only if processing was successful
+                cursor.execute("""
+                    UPDATE [dbo].[extraction_status] 
+                    SET has_match_details = CASE WHEN ? = 1 THEN 1 ELSE has_match_details END,
+                        has_lineups = CASE WHEN ? = 1 THEN 1 ELSE has_lineups END,
+                        has_stats = CASE WHEN ? = 1 THEN 1 ELSE has_stats END,
+                        has_momentum = CASE WHEN ? = 1 THEN 1 ELSE has_momentum END,
+                        has_player_stats = CASE WHEN ? = 1 THEN 1 ELSE has_player_stats END,
+                        has_shotmap = CASE WHEN ? = 1 THEN 1 ELSE has_shotmap END,
+                        extraction_time = GETDATE()
+                    WHERE match_id = ?
+                """, 
+                     1 if results.get('match_details', False) else 0,
+                     1 if results.get('lineups', False) else 0,
+                     1 if results.get('stats', False) else 0,
+                     1 if results.get('momentum', False) else 0,
+                     1 if results.get('player_stats', False) else 0,
+                     1 if results.get('shotmap', False) else 0,
+                     match_id)
+            else:
+                # Insert new record with actual success flags
+                cursor.execute("""
+                    INSERT INTO [dbo].[extraction_status] 
+                    (match_id, league_id, season_year, has_match_details, has_lineups, 
+                     has_stats, has_momentum, has_player_stats, has_shotmap, has_events)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, match_id, league_id, season_year,
+                     1 if results.get('match_details', False) else 0,
+                     1 if results.get('lineups', False) else 0,
+                     1 if results.get('stats', False) else 0,
+                     1 if results.get('momentum', False) else 0,
+                     1 if results.get('player_stats', False) else 0,
+                     1 if results.get('shotmap', False) else 0,
+                     json_structure.get('has_events', False))
             conn.commit()
             
             processed += 1
@@ -359,21 +373,9 @@ if __name__ == "__main__":
     # Connection string - update with your credentials
     connection_string = (
         "DRIVER={ODBC Driver 17 for SQL Server};"
-        "SERVER=your_server;"
+        "SERVER=DESKTOP-J9IV3OH;"
         "DATABASE=fussballDB;"
-        "UID=your_username;"
-        "PWD=your_password"
+        "Trusted_Connection=yes;"
     )
-    
-    # Note: This script assumes you have the individual extraction scripts as separate files:
-    # - extract_match_details.py
-    # - extract_lineups.py  
-    # - extract_stats.py
-    # - extract_momentum.py
-    # - extract_player_stats.py
-    # - extract_shotmap.py
-    #
-    # Each should have a process_single_match(conn, match_id, raw_json) function
-    # that handles its own error handling and returns True/False
     
     main(connection_string)

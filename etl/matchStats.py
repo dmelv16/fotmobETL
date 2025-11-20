@@ -3,6 +3,73 @@ import pyodbc
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+def process_single_match(conn, match_id: int, raw_json: str) -> bool:
+    """Process a single match's statistics."""
+    try:
+        create_stats_tables(conn)
+        cursor = conn.cursor()
+        
+        # Check if already processed
+        cursor.execute("SELECT match_id FROM [dbo].[match_stats] WHERE match_id = ?", match_id)
+        if cursor.fetchone():
+            return True
+        
+        parsed = parse_stats_data(raw_json)
+        if not parsed['stats']:
+            return False
+        
+        # Insert individual stats
+        for stat in parsed['stats']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_stats] (
+                    match_id, period, category, category_key, stat_name,
+                    stat_key, home_value, away_value, format, display_type, highlighted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, stat['match_id'], stat['period'], stat['category'], stat['category_key'],
+                 stat['stat_name'], stat['stat_key'],
+                 str(stat['home_value']) if stat['home_value'] is not None else None,
+                 str(stat['away_value']) if stat['away_value'] is not None else None,
+                 stat['format'], stat['type'], stat['highlighted'])
+        
+        # Insert summary
+        summary = build_summary(parsed['stats'], match_id)
+        if summary:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_stats_summary] (
+                    match_id, home_possession, away_possession,
+                    home_xg, away_xg, home_xg_open_play, away_xg_open_play,
+                    home_xg_set_play, away_xg_set_play, home_xgot, away_xgot,
+                    home_total_shots, away_total_shots, home_shots_on_target, away_shots_on_target,
+                    home_shots_off_target, away_shots_off_target, home_blocked_shots, away_blocked_shots,
+                    home_shots_inside_box, away_shots_inside_box, home_shots_outside_box, away_shots_outside_box,
+                    home_big_chances, away_big_chances, home_big_chances_missed, away_big_chances_missed,
+                    home_passes, away_passes, home_accurate_passes, away_accurate_passes,
+                    home_pass_accuracy_pct, away_pass_accuracy_pct,
+                    home_own_half_passes, away_own_half_passes,
+                    home_opposition_half_passes, away_opposition_half_passes,
+                    home_accurate_long_balls, away_accurate_long_balls,
+                    home_accurate_crosses, away_accurate_crosses,
+                    home_touches_opp_box, away_touches_opp_box,
+                    home_tackles, away_tackles, home_interceptions, away_interceptions,
+                    home_blocks, away_blocks, home_clearances, away_clearances,
+                    home_keeper_saves, away_keeper_saves,
+                    home_duels_won, away_duels_won, home_ground_duels_won, away_ground_duels_won,
+                    home_aerial_duels_won, away_aerial_duels_won,
+                    home_successful_dribbles, away_successful_dribbles,
+                    home_corners, away_corners, home_offsides, away_offsides,
+                    home_fouls, away_fouls, home_yellow_cards, away_yellow_cards,
+                    home_red_cards, away_red_cards
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, *summary)
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error in process_single_match for match {match_id}: {e}")
+        conn.rollback()
+        return False
+
+
 def parse_stats_data(raw_json: str) -> Dict[str, Any]:
     """Parse match statistics from raw JSON string."""
     data = json.loads(raw_json)

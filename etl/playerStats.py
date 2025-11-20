@@ -2,6 +2,60 @@ import json
 import pyodbc
 from typing import Dict, Any, List
 
+def process_single_match(conn, match_id: int, raw_json: str) -> bool:
+    """Process a single match's player statistics."""
+    try:
+        create_player_stats_tables(conn)
+        cursor = conn.cursor()
+        
+        # Check if already processed
+        cursor.execute("SELECT match_id FROM [dbo].[player_stats] WHERE match_id = ?", match_id)
+        if cursor.fetchone():
+            return True
+        
+        parsed = parse_player_stats(raw_json)
+        if not parsed['players']:
+            return False
+        
+        # Insert player stats
+        for stat in parsed['players']:
+            cursor.execute("""
+                INSERT INTO [dbo].[player_stats] (
+                    match_id, player_id, player_name, opta_id, team_id, team_name,
+                    is_goalkeeper, category, category_key, stat_name, stat_key,
+                    stat_value, stat_total, stat_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, stat['match_id'], stat['player_id'], stat['player_name'], stat['opta_id'],
+                 stat['team_id'], stat['team_name'], stat['is_goalkeeper'], stat['category'],
+                 stat['category_key'], stat['stat_name'], stat['stat_key'], stat['stat_value'],
+                 stat['stat_total'], stat['stat_type'])
+        
+        # Insert shotmap
+        for shot in parsed['shotmap']:
+            cursor.execute("""
+                INSERT INTO [dbo].[player_shotmap] (
+                    match_id, shot_id, event_type, team_id, player_id, player_name,
+                    x, y, minute, minute_added, is_blocked, is_on_target,
+                    blocked_x, blocked_y, goal_crossed_y, goal_crossed_z,
+                    expected_goals, expected_goals_on_target, shot_type,
+                    situation, period, is_own_goal, is_saved_off_line,
+                    is_from_inside_box
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, shot['match_id'], shot['shot_id'], shot['event_type'], shot['team_id'],
+                 shot['player_id'], shot['player_name'], shot['x'], shot['y'], shot['minute'],
+                 shot['minute_added'], shot['is_blocked'], shot['is_on_target'], shot['blocked_x'],
+                 shot['blocked_y'], shot['goal_crossed_y'], shot['goal_crossed_z'],
+                 shot['expected_goals'], shot['expected_goals_on_target'], shot['shot_type'],
+                 shot['situation'], shot['period'], shot['is_own_goal'], shot['is_saved_off_line'],
+                 shot['is_from_inside_box'])
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error in process_single_match for match {match_id}: {e}")
+        conn.rollback()
+        return False
+    
 def parse_player_stats(raw_json: str) -> Dict[str, Any]:
     """Parse player statistics from raw JSON string."""
     data = json.loads(raw_json)

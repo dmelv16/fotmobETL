@@ -2,6 +2,47 @@ import json
 import pyodbc
 from typing import Dict, Any
 
+def process_single_match(conn, match_id: int, raw_json: str) -> bool:
+    """Process a single match's shotmap data."""
+    try:
+        create_shotmap_table(conn)
+        cursor = conn.cursor()
+        
+        # Check if already processed
+        cursor.execute("SELECT match_id FROM [dbo].[match_shotmap] WHERE match_id = ?", match_id)
+        if cursor.fetchone():
+            return True
+        
+        parsed = parse_shotmap_data(raw_json)
+        if not parsed['shots']:
+            return False
+        
+        for shot in parsed['shots']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_shotmap] (
+                    match_id, shot_id, event_type, team_id, player_id, player_name,
+                    first_name, last_name, full_name, x, y, minute, minute_added,
+                    is_blocked, is_on_target, blocked_x, blocked_y,
+                    goal_crossed_y, goal_crossed_z, expected_goals,
+                    expected_goals_on_target, shot_type, situation, period,
+                    is_own_goal, is_saved_off_line, is_from_inside_box, team_color
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, shot['match_id'], shot['shot_id'], shot['event_type'], shot['team_id'],
+                 shot['player_id'], shot['player_name'], shot['first_name'], shot['last_name'],
+                 shot['full_name'], shot['x'], shot['y'], shot['minute'], shot['minute_added'],
+                 shot['is_blocked'], shot['is_on_target'], shot['blocked_x'], shot['blocked_y'],
+                 shot['goal_crossed_y'], shot['goal_crossed_z'], shot['expected_goals'],
+                 shot['expected_goals_on_target'], shot['shot_type'], shot['situation'],
+                 shot['period'], shot['is_own_goal'], shot['is_saved_off_line'],
+                 shot['is_from_inside_box'], shot['team_color'])
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error in process_single_match for match {match_id}: {e}")
+        conn.rollback()
+        return False
+    
 def parse_shotmap_data(raw_json: str) -> Dict[str, Any]:
     """Parse shotmap data from raw JSON string."""
     data = json.loads(raw_json)

@@ -2,6 +2,35 @@ import json
 import pyodbc
 from typing import Dict, Any
 
+def process_single_match(conn, match_id: int, raw_json: str) -> bool:
+    """Process a single match's momentum data."""
+    try:
+        create_momentum_table(conn)
+        cursor = conn.cursor()
+        
+        # Check if already processed
+        cursor.execute("SELECT match_id FROM [dbo].[match_momentum] WHERE match_id = ?", match_id)
+        if cursor.fetchone():
+            return True
+        
+        parsed = parse_momentum_data(raw_json)
+        if not parsed['momentum_data']:
+            return False
+        
+        for point in parsed['momentum_data']:
+            cursor.execute("""
+                INSERT INTO [dbo].[match_momentum] (
+                    match_id, minute, momentum_value, debug_title
+                ) VALUES (?, ?, ?, ?)
+            """, point['match_id'], point['minute'], point['value'], point['debug_title'])
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error in process_single_match for match {match_id}: {e}")
+        conn.rollback()
+        return False
+    
 def parse_momentum_data(raw_json: str) -> Dict[str, Any]:
     """Parse match momentum data from raw JSON string."""
     data = json.loads(raw_json)
