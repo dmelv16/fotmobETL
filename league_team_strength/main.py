@@ -7,9 +7,13 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 import sys
+import warnings
+# Suppress the specific SQLAlchemy warning from pandas
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, message='.*SQLAlchemy.*')
 
 from config.database import DatabaseConfig
-from config.league_mappings import TIER_1_LEAGUES, TIER_2_LEAGUES, TIER_2_5_LEAGUES
+from config.league_mappings import LeagueRegistry
 from core.database_manager import StrengthDatabaseManager
 from core.data_loader import FotMobDataLoader
 from models.elo_rating import EloRatingSystem
@@ -35,6 +39,8 @@ class StrengthCalculationOrchestrator:
         self.db_config = DatabaseConfig(connection_string)
         self.conn = None
         
+        self.league_registry = None
+
         # Initialize components (will be set up in initialize())
         self.data_loader = None
         self.elo_system = None
@@ -62,20 +68,26 @@ class StrengthCalculationOrchestrator:
         db_manager = StrengthDatabaseManager(self.conn)
         db_manager.create_all_tables()
         
+        logger.info("Loading league registry from database...")
+        self.league_registry = LeagueRegistry(self.conn)
+        
         # Initialize data loader
         self.data_loader = FotMobDataLoader(self.conn)
         
-        # Initialize models
-        self.elo_system = EloRatingSystem(self.conn, self.data_loader)
+        # Initialize models (pass registry where needed)
+        # UPDATED: Pass league_registry here
+        self.elo_system = EloRatingSystem(self.conn, self.data_loader, league_registry=self.league_registry)
+        
         self.transfer_analyzer = TransferPerformanceAnalyzer(self.conn, self.data_loader)
         self.european_analyzer = EuropeanResultsAnalyzer(self.conn, self.data_loader)
         self.xg_rater = XGPerformanceRater(self.conn, self.data_loader)
         self.squad_evaluator = SquadQualityEvaluator(self.conn, self.data_loader)
         self.style_profiler = StyleProfiler(self.conn, self.data_loader)
         
-        # Initialize calculators
+        # Initialize calculators (pass registry)
         self.league_calculator = LeagueStrengthCalculator(
-            self.conn, self.transfer_analyzer, self.european_analyzer, self.data_loader
+            self.conn, self.transfer_analyzer, self.european_analyzer, 
+            self.data_loader, self.league_registry
         )
         self.team_calculator = TeamStrengthCalculator(
             self.conn, self.elo_system, self.xg_rater, self.squad_evaluator, self.data_loader
@@ -89,34 +101,30 @@ class StrengthCalculationOrchestrator:
                       skip_existing: bool = True):
         """
         Process a complete season: calculate all strength metrics.
-        
-        Pipeline:
-        1. Process Elo ratings (match-by-match)
-        2. Analyze transfers between leagues
-        3. Process European competition results
-        4. Calculate league strengths
-        5. Calculate team strengths
-        6. Generate style profiles
-        7. Fill network gaps
         """
         logger.info(f"=" * 80)
         logger.info(f"Processing season {season_year}")
         logger.info(f"=" * 80)
         
         if league_ids is None:
-            # Default to all configured leagues
-            league_ids = (list(TIER_1_LEAGUES.keys()) + 
-                         list(TIER_2_LEAGUES.keys()) + 
-                         list(TIER_2_5_LEAGUES.keys()))
+            # Get ALL competitions from registry
+            league_ids = self.league_registry.get_all_leagues()
+            
+            # Log breakdown
+            domestic_leagues = self.league_registry.get_domestic_leagues()
+            cups = self.league_registry.get_cups()
+            continental = self.league_registry.get_continental_competitions()
+            
+            logger.info(f"Processing all competitions:")
+            logger.info(f"  - Domestic leagues: {len(domestic_leagues)}")
+            logger.info(f"  - Cup competitions: {len(cups)}")
+            logger.info(f"  - Continental competitions: {len(continental)}")
+            logger.info(f"  - Total: {len(league_ids)}")
         
         try:
-            # Step 1: Calculate Elo ratings for all leagues
+            # Step 1: Calculate Elo ratings for ALL competitions (leagues + cups + continental)
             logger.info("Step 1: Calculating Elo ratings...")
-            for league_id in league_ids:
-                try:
-                    self.elo_system.process_season(season_year, league_id, save_to_db=True)
-                except Exception as e:
-                    logger.error(f"Error processing Elo for league {league_id}: {e}")
+            self.elo_system.process_season(season_year, league_id=None, save_to_db=True)
             
             # Step 2: Analyze transfer performance
             logger.info("Step 2: Analyzing transfer performance...")
@@ -135,8 +143,15 @@ class StrengthCalculationOrchestrator:
             
             # Step 4: Calculate league strengths
             logger.info("Step 4: Calculating league strengths...")
-            league_results = self.league_calculator.calculate_all_leagues(season_year, league_ids)
+            domestic_league_ids = self.league_registry.get_domestic_leagues()
+            league_results = self.league_calculator.calculate_all_leagues(season_year, domestic_league_ids)
+            
             if len(league_results) > 0:
+                logger.info("Updating league tiers based on calculated strengths...")
+                self.league_registry.assign_tiers_from_strength(
+                    league_results[['league_id', 'overall_strength']]
+                )
+                
                 logger.info(f"Calculated strength for {len(league_results)} leagues")
                 logger.info("\nTop 10 Leagues:")
                 for i, row in league_results.head(10).iterrows():
@@ -144,19 +159,27 @@ class StrengthCalculationOrchestrator:
             else:
                 logger.warning("No league strengths calculated")
             
-            # Step 5: Calculate team strengths for each league
+            # Step 5: Calculate team strengths with temporal tracking
             logger.info("Step 5: Calculating team strengths...")
             total_teams = 0
+
+            # Choose your snapshot frequency here
+            snapshot_frequency = 'monthly'  # Options: 'monthly', 'quarterly', 'biweekly', 'matchday'
+
             for league_id in league_ids:
                 try:
-                    team_results = self.team_calculator.calculate_league_teams(league_id, season_year)
+                    team_results = self.team_calculator.calculate_league_teams(
+                        league_id, 
+                        season_year,
+                        snapshot_frequency=snapshot_frequency  # This enables timeline tracking
+                    )
                     total_teams += len(team_results)
-                    if len(team_results) > 0:
-                        logger.info(f"  League {league_id}: {len(team_results)} teams processed")
+                    
                 except Exception as e:
-                    logger.error(f"Error processing teams for league {league_id}: {e}")
-            
-            logger.info(f"Calculated strength for {total_teams} teams total")
+                    logger.error(f"Error processing league {league_id}: {e}", exc_info=True)  # CHANGE THIS LINE
+                    continue
+
+            logger.info(f"Calculated {total_teams} total team strength snapshots")
             
             # Step 6: Generate style profiles
             logger.info("Step 6: Generating style profiles...")
@@ -217,7 +240,6 @@ class StrengthCalculationOrchestrator:
                 self.process_season(season_year, league_ids)
             except Exception as e:
                 logger.error(f"Failed to process season {season_year}: {e}")
-                # Continue with next season
                 continue
     
     def generate_reports(self, season_year: int):

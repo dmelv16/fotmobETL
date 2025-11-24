@@ -13,6 +13,10 @@ ELO_K_FACTOR_EUROPEAN = 25
 ELO_HOME_ADVANTAGE = 100
 ELO_BASE_RATING = 1500
 
+# Rate at which ratings revert to the mean (1500) between seasons
+# 0.33 means 33% reversion (Rating = Old * 0.67 + 1500 * 0.33)
+REVERSION_RATE = 0.33 
+
 # League strength component weights
 LEAGUE_STRENGTH_WEIGHTS = {
     'transfer_matrix': 0.40,

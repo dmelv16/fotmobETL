@@ -21,6 +21,20 @@ class TemporalStrengthTracker:
         """
         Get historical league strength data.
         """
+        # ADD THIS: Validate league has matches in the requested seasons
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(DISTINCT YEAR(match_time_utc)) 
+            FROM [dbo].[match_details] 
+            WHERE parent_league_id = ? 
+            AND YEAR(match_time_utc) BETWEEN ? AND ?
+        """, league_id, start_season, end_season)
+        
+        seasons_with_matches = cursor.fetchone()[0]
+        
+        if seasons_with_matches == 0:
+            return pd.DataFrame()
+        
         query = """
             SELECT 
                 season_year,
@@ -32,7 +46,7 @@ class TemporalStrengthTracker:
                 trend_3yr
             FROM [dbo].[league_strength]
             WHERE league_id = ?
-              AND season_year BETWEEN ? AND ?
+            AND season_year BETWEEN ? AND ?
             ORDER BY season_year
         """
         
@@ -144,14 +158,18 @@ class TemporalStrengthTracker:
         return changes
     
     def calculate_strength_volatility(self, league_id: int, 
-                                     start_season: int, 
-                                     end_season: int) -> float:
+                                    start_season: int, 
+                                    end_season: int) -> float:
         """
         Calculate how volatile a league's strength has been (standard deviation).
         
         Returns: Volatility score (higher = more volatile)
         """
         history = self.get_league_strength_history(league_id, start_season, end_season)
+        
+        # ADD THIS: Check if we got valid data
+        if len(history) == 0:
+            return 0.0
         
         if len(history) < 2:
             return 0.0
@@ -174,8 +192,10 @@ class TemporalStrengthTracker:
         
         history = self.get_league_strength_history(league_id, start_season, current_season)
         
+        if len(history) == 0:
+            return None
+        
         if len(history) < 3:
-            logger.warning(f"Insufficient history for projection (league {league_id})")
             return None
         
         if method == 'linear':
@@ -211,5 +231,4 @@ class TemporalStrengthTracker:
             return float(projection)
         
         else:
-            logger.error(f"Unknown projection method: {method}")
             return None

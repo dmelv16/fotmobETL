@@ -3,7 +3,7 @@ import numpy as np
 from typing import Dict, List, Optional
 import logging
 from config.settings import LEAGUE_STRENGTH_WEIGHTS, STRENGTH_SCALE_MIN, STRENGTH_SCALE_MAX
-from config.league_mappings import get_league_info, TIER_1_LEAGUES, TIER_2_LEAGUES, TIER_2_5_LEAGUES
+from config.league_mappings import LeagueRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -12,45 +12,40 @@ class LeagueStrengthCalculator:
     Master calculator that combines all league strength components into final ratings.
     """
     
-    def __init__(self, connection, transfer_analyzer, european_analyzer, data_loader):
+    def __init__(self, connection, transfer_analyzer, european_analyzer, data_loader, league_registry):
         self.conn = connection
         self.transfer_analyzer = transfer_analyzer
         self.european_analyzer = european_analyzer
         self.data_loader = data_loader
+        self.league_registry = league_registry
     
     def calculate_league_strength(self, league_id: int, season_year: int,
                                   save_to_db: bool = True) -> Optional[Dict]:
-        """
-        Calculate comprehensive league strength score.
+        league_id = int(league_id)
+        season_year = int(season_year)
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM [dbo].[match_details] 
+            WHERE parent_league_id = ? AND YEAR(match_time_utc) = ?
+        """, (league_id, season_year))
         
-        Combines:
-        1. Transfer performance matrix
-        2. European competition results
-        3. Network inference (for leagues without direct data)
-        4. Historical consistency
+        match_count = cursor.fetchone()[0]
+        if match_count == 0:
+            return None
+                   
+        league_info = self.league_registry.get_league_info(league_id)
         
-        Returns: Dict with component scores and final composite strength
-        """
-        logger.info(f"Calculating league strength for league {league_id}, season {season_year}")
-        
-        league_info = get_league_info(league_id)
-        
-        # Component 1: Transfer Matrix Score
+        # Components
         transfer_score = self._get_transfer_matrix_score(league_id, season_year)
-        
-        # Component 2: European Results Score
         european_score = self._get_european_results_score(league_id, season_year)
-        
-        # Component 3: Network Inference Score
         network_score = self._get_network_inference_score(league_id, season_year)
-        
-        # Component 4: Historical Consistency Score
         historical_score = self._get_historical_consistency_score(league_id, season_year)
         
         # Calculate composite score
         weights = LEAGUE_STRENGTH_WEIGHTS
         
-        # Build component scores dict (with None handling)
         components = {
             'transfer': (transfer_score, weights['transfer_matrix']),
             'european': (european_score, weights['european_results']),
@@ -58,52 +53,42 @@ class LeagueStrengthCalculator:
             'historical': (historical_score, weights['historical_consistency'])
         }
         
-        # Calculate weighted average, adjusting weights for missing components
         total_weight = 0
         weighted_sum = 0
-        
+
         for comp_name, (score, weight) in components.items():
             if score is not None:
                 weighted_sum += score * weight
                 total_weight += weight
-        
+
+        # If we have no data points, we abort
         if total_weight == 0:
-            logger.warning(f"No valid components for league {league_id}, season {season_year}")
-            # Fall back to base strength from config
-            overall_strength = league_info.get('base_strength', 50)
-            calculation_confidence = 0.1
-        else:
-            # Normalize by actual total weight
-            overall_strength = weighted_sum / total_weight
-            
-            # Calculate confidence (more components = higher confidence)
-            components_available = sum(1 for score, _ in components.values() if score is not None)
-            calculation_confidence = components_available / len(components)
+            return None
         
-        # Ensure within bounds
+        # Calculate strength and confidence based on available components
+        overall_strength = weighted_sum / total_weight
+        components_available = sum(1 for score, _ in components.values() if score is not None)
+        calculation_confidence = components_available / len(components)
+        
         overall_strength = np.clip(overall_strength, STRENGTH_SCALE_MIN, STRENGTH_SCALE_MAX)
         
         result = {
             'league_id': league_id,
             'league_name': league_info['name'],
             'season_year': season_year,
-            'tier': league_info['tier'],
-            'transfer_matrix_score': transfer_score,
-            'european_results_score': european_score,
-            'network_inference_score': network_score,
-            'historical_consistency_score': historical_score,
-            'overall_strength': overall_strength,
-            'calculation_confidence': calculation_confidence,
+            'tier': self.league_registry.get_league_tier(league_id),
+            'transfer_matrix_score': float(transfer_score) if transfer_score else None,
+            'european_results_score': float(european_score) if european_score else None,
+            'network_inference_score': float(network_score) if network_score else None,
+            'historical_consistency_score': float(historical_score) if historical_score else None,
+            'overall_strength': float(overall_strength),
+            'calculation_confidence': float(calculation_confidence),
             'sample_size': self._get_total_sample_size(league_id, season_year)
         }
         
-        # Calculate trends if historical data exists
         trend_1yr, trend_3yr = self._calculate_trends(league_id, season_year)
-        result['trend_1yr'] = trend_1yr
-        result['trend_3yr'] = trend_3yr
-        
-        logger.info(f"League {league_id} strength: {overall_strength:.1f} "
-                   f"(confidence: {calculation_confidence:.2f})")
+        result['trend_1yr'] = float(trend_1yr) if trend_1yr is not None else None
+        result['trend_3yr'] = float(trend_3yr) if trend_3yr is not None else None
         
         if save_to_db:
             self._save_to_database(result)
@@ -111,383 +96,274 @@ class LeagueStrengthCalculator:
         return result
     
     def _get_transfer_matrix_score(self, league_id: int, season_year: int) -> Optional[float]:
-        """
-        Get strength score derived from transfer performance analysis.
-        Uses the league network edges table.
-        """
         cursor = self.conn.cursor()
-        
-        # Get all transfer-based relationships involving this league
         cursor.execute("""
-            SELECT 
-                league_a_id,
-                league_b_id,
-                strength_gap_estimate,
-                gap_confidence,
-                total_transfers
+            SELECT league_a_id, league_b_id, strength_gap_estimate, gap_confidence
             FROM [dbo].[league_network_edges]
             WHERE (league_a_id = ? OR league_b_id = ?)
-              AND season_year = ?
-              AND gap_method = 'transfer'
-              AND total_transfers >= ?
-        """, league_id, league_id, season_year, 5)
+              AND season_year = ? AND gap_method = 'transfer' AND total_transfers >= ?
+        """, (int(league_id), int(league_id), int(season_year), 5))
         
         edges = cursor.fetchall()
-        
-        if not edges:
+        if not edges: 
             return None
         
-        # Calculate relative strength based on known relationships
-        # Use anchor leagues (Tier 1) as reference points
-        anchor_strengths = {lid: info['base_strength'] for lid, info in TIER_1_LEAGUES.items()}
-        
+        anchor_leagues = self._get_anchor_leagues(season_year - 1)
+        if not anchor_leagues:
+            return None
+            
         strength_estimates = []
         
         for edge in edges:
-            league_a, league_b, gap, confidence, sample_size = edge
+            la, lb, gap, conf = edge
             
-            if league_a == league_id:
-                # This league is A, gap tells us about B relative to A
-                if league_b in anchor_strengths:
-                    # We know B's strength, can infer A's
-                    # If gap = 1.2 (B is 20% harder than A), and B = 90, then A ≈ 75
-                    inferred_strength = anchor_strengths[league_b] / gap
-                    strength_estimates.append((inferred_strength, confidence))
+            # CRITICAL FIX: Properly interpret gap direction
+            # gap = strength_a / strength_b (la is gap times stronger than lb)
             
-            elif league_b == league_id:
-                # This league is B
-                if league_a in anchor_strengths:
-                    # A is known, gap tells us about B
-                    inferred_strength = anchor_strengths[league_a] * gap
-                    strength_estimates.append((inferred_strength, confidence))
+            if la == league_id and lb in anchor_leagues:
+                # We are league_a, they are league_b
+                # gap = our_strength / their_strength
+                # Therefore: our_strength = gap * their_strength
+                estimated_strength = gap * anchor_leagues[lb]
+                strength_estimates.append((estimated_strength, conf))
+                
+            elif lb == league_id and la in anchor_leagues:
+                # We are league_b, they are league_a  
+                # gap = their_strength / our_strength
+                # Therefore: our_strength = their_strength / gap
+                estimated_strength = anchor_leagues[la] / gap if gap > 0.01 else anchor_leagues[la] / 0.01
+                strength_estimates.append((estimated_strength, conf))
         
-        if not strength_estimates:
-            # No anchors found, use base estimate from config
-            league_info = get_league_info(league_id)
-            return league_info.get('base_strength')
+        if not strength_estimates: 
+            return None
         
-        # Weighted average of estimates
         strengths = np.array([s[0] for s in strength_estimates])
-        confidences = np.array([s[1] for s in strength_estimates])
+        confs = np.array([s[1] for s in strength_estimates])
         
-        weighted_strength = np.average(strengths, weights=confidences)
+        result = float(np.average(strengths, weights=confs))
         
-        return float(weighted_strength)
+        # Sanity check - clip to reasonable bounds
+        result = np.clip(result, STRENGTH_SCALE_MIN, STRENGTH_SCALE_MAX)
+        
+        return result
+    
+    def _get_anchor_leagues(self, target_season: int) -> Dict[int, float]:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT TOP 20 ls.league_id, ls.overall_strength
+            FROM [dbo].[league_strength] ls
+            INNER JOIN [dbo].[LeagueDivisions] ld ON ls.league_id = ld.LeagueID
+            WHERE ls.season_year = ? AND ld.DivisionLevel = '1' AND ls.calculation_confidence > 0.5
+            ORDER BY ls.overall_strength DESC
+        """, (int(target_season),))
+        
+        results = cursor.fetchall()
+        if results: 
+            return {row[0]: float(row[1]) for row in results}
+        
+        # Fallback for first season - use reasonable defaults for top leagues
+        top_divisions = self.league_registry.get_top_division_leagues()
+        return {lid: 70.0 for lid in top_divisions[:20]}
     
     def _get_european_results_score(self, league_id: int, season_year: int) -> Optional[float]:
-        """
-        Get strength score from European competition performance.
-        """
         cursor = self.conn.cursor()
-        
-        # Get European competition results for teams from this league
         cursor.execute("""
-            SELECT 
-                result,
-                expected_result,
-                actual_result,
-                competition_weight
+            SELECT result, expected_result, actual_result, competition_weight
             FROM [dbo].[european_competition_results]
-            WHERE (home_league_id = ? OR away_league_id = ?)
-              AND season_year = ?
-        """, league_id, league_id, season_year)
+            WHERE (home_league_id = ? OR away_league_id = ?) AND season_year = ?
+        """, (int(league_id), int(league_id), int(season_year)))
         
         results = cursor.fetchall()
         
-        if not results:
+        # CRITICAL FIX: Return None instead of 0 when no data
+        if not results: 
             return None
         
-        # Calculate performance vs expectation
         total_weight = 0
         weighted_performance = 0
+        for _, expected, actual, weight in results:
+            weighted_performance += (actual - expected) * weight
+            total_weight += weight
         
-        for result, expected, actual, comp_weight in results:
-            # How much did teams from this league overperform?
-            performance = actual - expected
-            weighted_performance += performance * comp_weight
-            total_weight += comp_weight
-        
-        if total_weight == 0:
+        if total_weight == 0: 
             return None
         
         avg_performance = weighted_performance / total_weight
+        league_info = self.league_registry.get_league_info(league_id)
+        base_strength = league_info.get('base_strength') or 50.0
         
-        # Convert performance metric to strength score
-        # Positive performance = exceeding expectations = stronger league
-        # Scale: -0.5 to +0.5 performance → ±10 strength points around base
-        league_info = get_league_info(league_id)
-        base_strength = league_info.get('base_strength', 70)
+        # Performance adjustment scaled appropriately
+        # avg_performance ranges roughly -1 to +1, scale to +/- 20 points
+        result = base_strength + (avg_performance * 20)
         
-        adjustment = avg_performance * 20  # Scale factor
-        final_strength = base_strength + adjustment
+        return float(np.clip(result, STRENGTH_SCALE_MIN, STRENGTH_SCALE_MAX))
+
+    def _has_historical_data(self, season_year: int) -> bool:
+        """Check if we have real historical data (not just fallbacks)"""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM [dbo].[league_strength]
+            WHERE season_year = ?
+        """, (int(season_year),))
         
-        return float(np.clip(final_strength, STRENGTH_SCALE_MIN, STRENGTH_SCALE_MAX))
+        count = cursor.fetchone()[0]
+        return count > 0
     
     def _get_network_inference_score(self, league_id: int, season_year: int) -> Optional[float]:
-        """
-        Infer strength using network graph traversal.
-        For leagues without direct transfer/European data, use transitive relationships.
-        """
         cursor = self.conn.cursor()
-        
-        # Get all edges in the network
         cursor.execute("""
-            SELECT 
-                league_a_id,
-                league_b_id,
-                strength_gap_estimate,
-                gap_confidence
+            SELECT league_a_id, league_b_id, strength_gap_estimate, gap_confidence
             FROM [dbo].[league_network_edges]
-            WHERE season_year = ?
-              AND strength_gap_estimate IS NOT NULL
-        """, season_year)
+            WHERE season_year = ? AND strength_gap_estimate IS NOT NULL
+        """, (int(season_year),))
         
         edges = cursor.fetchall()
-        
-        if not edges:
+        if not edges: 
             return None
         
-        # Build adjacency graph
+        # Build bidirectional graph
         graph = {}
-        for league_a, league_b, gap, confidence in edges:
-            if league_a not in graph:
-                graph[league_a] = []
-            if league_b not in graph:
-                graph[league_b] = []
+        for la, lb, gap, conf in edges:
+            if la not in graph: 
+                graph[la] = []
+            if lb not in graph: 
+                graph[lb] = []
             
-            graph[league_a].append((league_b, gap, confidence))
-            # Reverse direction (inverse gap)
-            graph[league_b].append((league_a, 1/gap if gap != 0 else 1.0, confidence))
+            safe_gap = max(gap, 0.01)
+            graph[la].append((lb, safe_gap, conf))
+            graph[lb].append((la, 1.0 / safe_gap, conf))
         
-        # Use BFS to find paths to anchor leagues
-        anchor_strengths = {lid: info['base_strength'] for lid, info in TIER_1_LEAGUES.items()}
+        anchor_strengths = self._get_anchor_leagues(season_year - 1)
+        if not anchor_strengths:
+            return None
         
-        if league_id in anchor_strengths:
-            return anchor_strengths[league_id]
-        
+        # **NEW: Check if this league actually has edges in the graph**
         if league_id not in graph:
             return None
         
-        # Find shortest paths to any anchor league
-        from collections import deque
+        # **NEW: Check if this league has direct connections to any anchors**
+        # If using fallback anchors (first season), require direct connection
+        has_real_data = self._has_historical_data(season_year - 1)
         
-        visited = {league_id}
-        queue = deque([(league_id, 1.0, 1.0)])  # (node, cumulative_gap, cumulative_confidence)
-        
-        strength_estimates = []
-        
-        while queue and len(strength_estimates) < 5:  # Limit to 5 paths for efficiency
-            current, cum_gap, cum_confidence = queue.popleft()
+        if not has_real_data:
+            # First season - only trust direct connections
+            direct_neighbors = [neighbor for neighbor, _, _ in graph.get(league_id, [])]
+            has_direct_anchor = any(n in anchor_strengths for n in direct_neighbors)
             
-            if current in anchor_strengths and current != league_id:
-                # Found an anchor - infer strength
-                inferred_strength = anchor_strengths[current] / cum_gap
-                strength_estimates.append((inferred_strength, cum_confidence))
-                continue
-            
-            # Explore neighbors
-            if current in graph:
-                for neighbor, gap, confidence in graph[current]:
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        new_gap = cum_gap * gap
-                        new_confidence = cum_confidence * confidence * 0.9  # Decay confidence with distance
-                        
-                        if new_confidence > 0.1:  # Only pursue if confidence remains reasonable
-                            queue.append((neighbor, new_gap, new_confidence))
-        
-        if not strength_estimates:
-            return None
-        
-        # Weighted average
-        strengths = np.array([s[0] for s in strength_estimates])
-        confidences = np.array([s[1] for s in strength_estimates])
-        
-        weighted_strength = np.average(strengths, weights=confidences)
-        
-        return float(weighted_strength)
+            if not has_direct_anchor:
+                return None  # Don't infer strength through multiple hops in first season
     
     def _get_historical_consistency_score(self, league_id: int, season_year: int) -> Optional[float]:
-        """
-        Get strength based on historical performance (smoothing year-to-year volatility).
-        """
         cursor = self.conn.cursor()
-        
-        # Get previous seasons' strength scores
         cursor.execute("""
-            SELECT TOP 3
-                season_year,
-                overall_strength
-            FROM [dbo].[league_strength]
-            WHERE league_id = ?
-              AND season_year < ?
-            ORDER BY season_year DESC
-        """, league_id, season_year)
+            SELECT TOP 3 overall_strength FROM [dbo].[league_strength]
+            WHERE league_id = ? AND season_year < ? ORDER BY season_year DESC
+        """, (int(league_id), int(season_year)))
         
         historical = cursor.fetchall()
-        
-        if not historical:
+        if not historical: 
             return None
         
-        # Weight recent seasons more heavily (exponential decay)
-        weights = [0.5, 0.3, 0.2]  # Most recent, 2 years ago, 3 years ago
-        
-        weighted_strength = sum(
-            strength * weights[i] 
-            for i, (year, strength) in enumerate(historical)
-        )
-        
-        return float(weighted_strength)
+        vals = [h[0] for h in historical]
+        weights = [0.5, 0.3, 0.2][:len(vals)]
+        norm_weights = [w/sum(weights) for w in weights]
+        return float(sum(v * w for v, w in zip(vals, norm_weights)))
     
     def _calculate_trends(self, league_id: int, season_year: int) -> tuple:
-        """
-        Calculate 1-year and 3-year strength trends.
-        Returns: (trend_1yr, trend_3yr) in percentage points
-        """
         cursor = self.conn.cursor()
-        
-        # Get current and historical strengths
         cursor.execute("""
-            SELECT 
-                season_year,
-                overall_strength
-            FROM [dbo].[league_strength]
-            WHERE league_id = ?
-              AND season_year <= ?
-            ORDER BY season_year DESC
-        """, league_id, season_year)
+            SELECT season_year, overall_strength FROM [dbo].[league_strength]
+            WHERE league_id = ? AND season_year < ? ORDER BY season_year DESC
+        """, (int(league_id), int(season_year)))
         
         history = cursor.fetchall()
-        
-        if len(history) < 2:
+        if len(history) < 2: 
             return None, None
         
-        strengths_dict = {year: strength for year, strength in history}
+        strengths = {h[0]: h[1] for h in history}
         
-        # 1-year trend
-        trend_1yr = None
-        if season_year in strengths_dict and season_year - 1 in strengths_dict:
-            trend_1yr = strengths_dict[season_year] - strengths_dict[season_year - 1]
+        # Calculate 1-year trend from the two most recent historical seasons
+        most_recent_year = history[0][0]
+        prev_year = most_recent_year - 1
+        trend_1yr = strengths[most_recent_year] - strengths[prev_year] if prev_year in strengths else None
         
-        # 3-year trend (linear regression slope)
+        # Calculate 3-year trend
         trend_3yr = None
-        if len(history) >= 4:
-            years = np.array([h[0] for h in history[:4]])
-            strengths = np.array([h[1] for h in history[:4]])
+        if len(history) >= 3:
+            yrs = np.array([h[0] for h in history[:3]])
+            strs = np.array([h[1] for h in history[:3]])
+            trend_3yr = np.polyfit(yrs, strs, 1)[0]
             
-            # Simple linear regression
-            slope = np.polyfit(years, strengths, 1)[0]
-            trend_3yr = slope
-        
         return trend_1yr, trend_3yr
     
     def _get_total_sample_size(self, league_id: int, season_year: int) -> int:
-        """
-        Get total sample size used in calculation (transfers + European matches).
-        """
         cursor = self.conn.cursor()
-        
-        # Transfers
         cursor.execute("""
-            SELECT COALESCE(SUM(total_transfers), 0)
-            FROM [dbo].[league_network_edges]
-            WHERE (league_a_id = ? OR league_b_id = ?)
-              AND season_year = ?
-        """, league_id, league_id, season_year)
+            SELECT COALESCE(SUM(total_transfers), 0) 
+            FROM [dbo].[league_network_edges] 
+            WHERE (league_a_id = ? OR league_b_id = ?) AND season_year = ?
+        """, (int(league_id), int(league_id), int(season_year)))
+        t = cursor.fetchone()[0]
         
-        transfers = cursor.fetchone()[0]
-        
-        # European matches
         cursor.execute("""
-            SELECT COUNT(*)
-            FROM [dbo].[european_competition_results]
-            WHERE (home_league_id = ? OR away_league_id = ?)
-              AND season_year = ?
-        """, league_id, league_id, season_year)
+            SELECT COUNT(*) 
+            FROM [dbo].[european_competition_results] 
+            WHERE (home_league_id = ? OR away_league_id = ?) AND season_year = ?
+        """, (int(league_id), int(league_id), int(season_year)))
+        e = cursor.fetchone()[0]
         
-        european = cursor.fetchone()[0]
-        
-        return int(transfers + european)
+        return int(t + e)
     
     def _save_to_database(self, result: Dict):
-        """Save league strength to database."""
         cursor = self.conn.cursor()
-        
-        # Check if exists
         cursor.execute("""
-            SELECT id FROM [dbo].[league_strength]
+            SELECT id FROM [dbo].[league_strength] 
             WHERE league_id = ? AND season_year = ?
-        """, result['league_id'], result['season_year'])
+        """, (result['league_id'], result['season_year']))
+        exists = cursor.fetchone()
         
-        existing = cursor.fetchone()
+        params = [
+            result['league_name'], result['tier'], result['transfer_matrix_score'],
+            result['european_results_score'], result['network_inference_score'],
+            result['historical_consistency_score'], result['overall_strength'],
+            result['calculation_confidence'], result['sample_size'],
+            result['trend_1yr'], result['trend_3yr'],
+            result['league_id'], result['season_year']
+        ]
         
-        if existing:
-            # Update
+        if exists:
             cursor.execute("""
-                UPDATE [dbo].[league_strength]
-                SET league_name = ?,
-                    tier = ?,
-                    transfer_matrix_score = ?,
-                    european_results_score = ?,
-                    network_inference_score = ?,
-                    historical_consistency_score = ?,
-                    overall_strength = ?,
-                    calculation_confidence = ?,
-                    sample_size = ?,
-                    trend_1yr = ?,
-                    trend_3yr = ?,
-                    last_updated = GETDATE()
-                WHERE league_id = ? AND season_year = ?
-            """, result['league_name'], result['tier'],
-                 result['transfer_matrix_score'], result['european_results_score'],
-                 result['network_inference_score'], result['historical_consistency_score'],
-                 result['overall_strength'], result['calculation_confidence'],
-                 result['sample_size'], result['trend_1yr'], result['trend_3yr'],
-                 result['league_id'], result['season_year'])
+                UPDATE [dbo].[league_strength] 
+                SET league_name=?, tier=?, transfer_matrix_score=?, european_results_score=?, 
+                    network_inference_score=?, historical_consistency_score=?, overall_strength=?, 
+                    calculation_confidence=?, sample_size=?, trend_1yr=?, trend_3yr=?, 
+                    last_updated=GETDATE()
+                WHERE league_id=? AND season_year=?
+            """, params)
         else:
-            # Insert
             cursor.execute("""
-                INSERT INTO [dbo].[league_strength] (
-                    league_id, league_name, season_year, tier,
-                    transfer_matrix_score, european_results_score,
-                    network_inference_score, historical_consistency_score,
-                    overall_strength, calculation_confidence, sample_size,
-                    trend_1yr, trend_3yr
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, result['league_id'], result['league_name'], result['season_year'],
-                 result['tier'], result['transfer_matrix_score'], result['european_results_score'],
-                 result['network_inference_score'], result['historical_consistency_score'],
-                 result['overall_strength'], result['calculation_confidence'],
-                 result['sample_size'], result['trend_1yr'], result['trend_3yr'])
-        
+                INSERT INTO [dbo].[league_strength] 
+                (league_name, tier, transfer_matrix_score, european_results_score, 
+                 network_inference_score, historical_consistency_score, overall_strength, 
+                 calculation_confidence, sample_size, trend_1yr, trend_3yr, league_id, season_year)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, params)
         self.conn.commit()
-        logger.info(f"Saved league strength for league {result['league_id']}, season {result['season_year']}")
     
     def calculate_all_leagues(self, season_year: int, league_ids: List[int] = None) -> pd.DataFrame:
-        """
-        Calculate strength for all leagues in a season.
-        
-        Returns: DataFrame with all league strengths
-        """
         if league_ids is None:
-            # Get all leagues that have data
-            league_ids = list(TIER_1_LEAGUES.keys()) + list(TIER_2_LEAGUES.keys()) + list(TIER_2_5_LEAGUES.keys())
+            league_ids = self.league_registry.get_domestic_leagues()
         
         results = []
-        
         for league_id in league_ids:
             try:
-                result = self.calculate_league_strength(league_id, season_year, save_to_db=True)
-                if result:
+                result = self.calculate_league_strength(int(league_id), int(season_year), save_to_db=True)
+                if result: 
                     results.append(result)
             except Exception as e:
-                logger.error(f"Error calculating strength for league {league_id}: {e}")
-                continue
+                logger.error(f"Error calculating strength for league {league_id}: {e}", exc_info=True)
         
-        if not results:
+        if not results: 
             return pd.DataFrame()
-        
-        df = pd.DataFrame(results)
-        df = df.sort_values('overall_strength', ascending=False)
-        
-        return df
+        return pd.DataFrame(results).sort_values('overall_strength', ascending=False)

@@ -19,8 +19,14 @@ class StrengthDatabaseManager:
         self.create_team_elo_history_table()
         self.create_league_network_table()
         self.create_style_profile_table()
-        logger.info("All strength calculation tables created successfully")
-    
+        # Verify all tables were created
+        logger.info("\nVerifying tables...")
+        if self.verify_tables():
+            logger.info("✓ All strength calculation tables created successfully")
+        else:
+            logger.error("✗ Some tables failed to create")
+            raise Exception("Database table creation incomplete")    
+        
     def create_league_strength_table(self):
         """Table for storing league strength scores over time."""
         cursor = self.conn.cursor()
@@ -345,3 +351,46 @@ class StrengthDatabaseManager:
             END
         """)
         self.conn.commit()
+
+    def verify_tables(self) -> bool:
+        """
+        Verify all strength tables exist.
+        Returns True if all tables exist, False otherwise.
+        """
+        cursor = self.conn.cursor()
+        
+        required_tables = [
+            'league_strength',
+            'team_strength',
+            'transfer_performance_analysis',
+            'european_competition_results',
+            'team_elo_history',
+            'league_network_edges',
+            'style_profiles'
+        ]
+        
+        existing_tables = []
+        missing_tables = []
+        
+        for table in required_tables:
+            cursor.execute(f"""
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = '{table}'
+            """)
+            
+            exists = cursor.fetchone()[0]
+            
+            if exists:
+                existing_tables.append(table)
+                logger.info(f"  ✓ {table}")
+            else:
+                missing_tables.append(table)
+                logger.error(f"  ✗ {table} - NOT FOUND")
+        
+        if missing_tables:
+            logger.error(f"Missing {len(missing_tables)} tables: {missing_tables}")
+            return False
+        
+        logger.info(f"All {len(existing_tables)} strength calculation tables verified")
+        return True

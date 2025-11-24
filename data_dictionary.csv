@@ -1,0 +1,52 @@
+﻿Type,Name,Description,Fields to Use
+Coach,Performance,Expected result vs Actual Result,"squad_rating, home_team_score, away_team_score"
+Coach,Adaptability,"Points gained or lost when losing or winning at certain points in the game. Such as halftime, second half, and goals scored or conceded past the 80th minute that change the game","time_minute, home_score_before, home_score_after, away_score_after, away_score_before, home_team_score, away_team_score"
+Coach,Player Development,Do player ratings usually go up or down when they play for this coach,All attribute level ratings
+Coach,Youth Development,Do players under 23 ratings go up or down for this coach?,All attribute level ratings for players under 23
+Coach,Defense,"Goals, shots, etc conceded to league average","home_team_score, away_team_score, home_xg, away_xg, home_xg_open_play, away_xg_open_play, home_shots_on_target, away_shots_on_target"
+Coach,Discipline,"Yellow cards, red cards, fouls compared to league average","home_fouls ,away_fouls,number_home_yellow_cards, number_of_away_yellow_cards, number_of_home_red_cards, number_of_away_red_cards"
+Coach,Rotation,Rotation of players in the starting XI,match_lineup_players table
+Coach,Attack,"Goals, shots, etc scored to league average","home_team_score, away_team_score, home_xg, away_xg, home_xg_open_play, away_xg_open_play, home_shots_on_target, away_shots_on_target"
+Coach,Decisions,Quality of substitutions to league average,"match_substitutions_table and then check for result changes for the better, worse, or stayed the same depending on desired outcome"
+Coach,Attacking Style,Style of play with the ball,"home or away own_half_passes vs home or away opposition_half_passes, homne or away big_chances, home or away accurate_long_balls, home or away touches_opp_box, home or away possesion"
+Coach,Defending Style,Style of play without the ball,"home or away duels_won, home or away tackles, home or away possession"
+Player,GoalScoring,Pure goals scored per 90 metric,"event_type = 'goal', player_name matches player_name iin match_lineup players. This is for matches without the player_stats table available, player_id is null in match_events so we need to map the name, match id to the lineup to get the real player_id in lineup table. We can then check match_substitutes to see if a player was subbed on or off and then do their goals per 90 metric. If a match doesnt have this available we assume they played 90 minutes. If player_stats is available we use stat_key = 'goals', stat_value, stat_key = 'minutes_played', stat_value, player_id"
+Player,Finishing,How well a player finishes their chances,"stat_key where we see goals, total_shots, expected_goals, expected_goals_on_target_variant, ShotsOnTarget, big_chance_missed_title, stat_total where null is 0"
+Player,Long Shots,Using the match_shopmap table we can grab how good a player is at long shots,"player_id, x, y, is_blocked, is_on_target, expected_goals, is_from_inside_box, event_type = 'Goal', 'Miss', 'AttemptSaved'"
+Player,Free Kicks,Using the match_shotmap table we can track situation = 'FreeKick' to see how good a player is at free kicks,"player_id, x, y, is_blocked, is_on_target, expected_goals, is_from_inside_box, event_type = 'Goal', 'Miss', 'AttemptSaved'"
+Player,Technique,How technical a player is in the game,"dribbles_succeeded, accurate_passes (percentage), accurate_crosses (percentage), passes_into_final_third"
+Player,Crosses,How good a player is at crosses and how often they cross,"accurate_crosses, crosses, corners"
+Player,Dribbling,How good a player is at dribbling,"dribbles_succeeded, dispossessed"
+Player,First Touch,How good a players first touch is,"touches, dispossessed, big_chance_missed_title"
+Player,Marking,How good a player marks their man,"defensive_actions, shot_blocks, clearances, recoveries, dribbled_past"
+Player,Tackling,How good a player tackles,"matchstats.headers.tackles, shot_blocks, aerials_won, duel_lost, duel_won, ground_duels_won, last_man_tackle"
+Player,Aggression,How aggressive a player is,"conceded_penalties, fouls, total_shots"
+Player,Anticipation,How good a player can anticipate,interceptions
+Player,Bravery,How brave a player is,"duel_won, chances_created, minutes_played, recoveries, dribbles_succeeded, touches_opp_box"
+Player,Composure,How composed a player is,"touches_opp_box, accurate_crosses, accurate_passes,  dispossessed, dribbled_past, big_chance_missed_title, clearance_off_the_line, last_man_tackle, owngoal, Offsides, missed_penalty"
+Player,Concentration,Performance in big matches,Metric that finds where team rating is less than opponent team rating
+Player,Decisions,Decision making of the player,"dispossessed, accurate_crosses, accurate_passes, passes_into_final_third, ShotsOnTarget"
+Player,Flair,Dribbling stats,"dribbles_succeeded, long_balls_accurate, was_fouled"
+Player,Leadership,Overall squad performance metric when a player is in the starting lineup,"wins, goals scored, goals conceded when a player is in starting lineup"
+Player,Off the Ball,How good a player is off the ball,"big_chance_missed_title, recoveries, interceptions, shot_blocks, xg_and_xa"
+Player,Positioning,How good a player is in position,"expected_goals, error_led_to_goal, interceptions, shot_blocks, expected_goals_on_target_variant, touches_opp_box, clearance_off_the_line"
+Player,Teamwork,How helpful a player is,"assists, accurate_passes, chances_created, expected_assists, defensive_actions"
+Player,Vision,The vision of a player,"assists, accurate_passes, chances_created, expected_assists, passes_into_final_third, long_balls_accurate"
+Player,Work Rate,Work rate of a player,"minutes_played, rating_title"
+Player,Stamina,How many minutes a player played,minutes_played
+Player,Jumping,The aerial ability,"aerials_won, headed_clearance"
+Player,Natural Fitness,Injury Proneness,"Check match_unavailable_players table and find injury_id, if populated for the player_id and match_id they are injured for this game"
+Player,Strength,Duels won,"duel_lost, duel_won"
+Player,Consistency,How volatile is a player performance?,rating_title
+Player,Versatility,How many positions is a player average or above at,use match_lineup_players to find the position_id for the player and see what positions they’ve played in the past and how good they were in that position and formation
+Player,Adaptability,How good is a player that plays in different leagues and countries?,"Track performance for players across leagues, countries and see how adaptable they are"
+Player,Loyalty,How many years does a player stay on one team,Track how many years a player stays on one team
+Player,Pressure,How good is a player in a big game,Track player performance for big games
+Team,Possession,How much possession does a team usual have in a game,home and away possession
+Team,Chances,"expected goals, chances created of a team","home and away xg, home and away xg_open_play, home and away total_shots, home and away big_chances"
+Team,Aggression,How aggressive a team is,"yellow_cards, red_cards, offsides, fouls"
+Team,Important Matches,Performance in big matches,Metric that finds where team rating is less than opponent team rating
+League,Possession,How much possession does a team usual have in a game,home and away possession
+League,Chances,"expected goals, chances created of a team","home and away xg, home and away xg_open_play, home and away total_shots, home and away big_chances"
+League,Aggression,How aggressive a team is,"yellow_cards, red_cards, offsides, fouls"
+League,Important Matches,Performance in big matches,Metric that finds where team rating is less than opponent team rating

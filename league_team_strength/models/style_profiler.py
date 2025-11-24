@@ -16,6 +16,20 @@ class StyleProfiler:
     def __init__(self, connection, data_loader):
         self.conn = connection
         self.data_loader = data_loader
+
+    def _convert_to_python_types(self, profile: Dict) -> Dict:
+        """Convert numpy types to native Python types for database insertion."""
+        converted = {}
+        for key, value in profile.items():
+            if value is None:
+                converted[key] = None
+            elif isinstance(value, (np.integer, np.int64, np.int32)):
+                converted[key] = int(value)
+            elif isinstance(value, (np.floating, np.float64, np.float32)):
+                converted[key] = float(value)
+            else:
+                converted[key] = value
+        return converted
     
     def calculate_team_style_profile(self, team_id: int, season_year: int) -> Optional[Dict]:
         """
@@ -50,15 +64,23 @@ class StyleProfiler:
         if len(df) < 5:
             return None
         
-        # Calculate average metrics
-        avg_possession = df['possession'].mean()
-        avg_passes = df['passes'].mean()
-        avg_long_balls = df['long_balls'].mean()
-        avg_crosses = df['crosses'].mean()
-        avg_tackles = df['tackles'].mean()
-        avg_fouls = df['fouls'].mean()
-        avg_shots = df['shots'].mean()
-        avg_corners = df['corners'].mean()
+        # Calculate average metrics with safe handling
+        def safe_mean(series):
+            if len(series) == 0:
+                return 0.0
+            mean_val = series.mean()
+            if pd.isna(mean_val) or np.isinf(mean_val):
+                return 0.0
+            return float(mean_val)
+        
+        avg_possession = safe_mean(df['possession'])
+        avg_passes = safe_mean(df['passes'])
+        avg_long_balls = safe_mean(df['long_balls'])
+        avg_crosses = safe_mean(df['crosses'])
+        avg_tackles = safe_mean(df['tackles'])
+        avg_fouls = safe_mean(df['fouls'])
+        avg_shots = safe_mean(df['shots'])
+        avg_corners = safe_mean(df['corners'])
         
         # Derive style metrics (0-100 scales)
         
@@ -67,12 +89,12 @@ class StyleProfiler:
         
         # Direct play index (long balls per total passes)
         if avg_passes > 0:
-            direct_play_index = (avg_long_balls / avg_passes) * 100
+            direct_play_index = min((avg_long_balls / avg_passes) * 100, 100)
         else:
-            direct_play_index = 50
+            direct_play_index = 50.0
         
         # Crossing frequency (normalized)
-        crossing_frequency = min(avg_crosses * 5, 100)  # Scale to 0-100
+        crossing_frequency = min(avg_crosses * 5, 100)
         
         # Defensive intensity (tackles per game, normalized)
         defensive_intensity = min(avg_tackles * 5, 100)
@@ -87,19 +109,19 @@ class StyleProfiler:
             'entity_type': 'team',
             'entity_id': team_id,
             'season_year': season_year,
-            'possession_focus': possession_focus,
-            'direct_play_index': direct_play_index,
-            'crossing_frequency': crossing_frequency,
-            'defensive_intensity': defensive_intensity,
-            'physical_intensity': physical_intensity,
-            'attacking_volume': attacking_volume,
-            'avg_possession_pct': avg_possession,
-            'avg_passes_per_game': avg_passes,
-            'avg_long_balls_per_game': avg_long_balls,
-            'avg_crosses_per_game': avg_crosses,
-            'avg_tackles_per_game': avg_tackles,
-            'avg_fouls_per_game': avg_fouls,
-            'matches_analyzed': len(df)
+            'possession_focus': float(possession_focus),
+            'direct_play_index': float(direct_play_index),
+            'crossing_frequency': float(crossing_frequency),
+            'defensive_intensity': float(defensive_intensity),
+            'physical_intensity': float(physical_intensity),
+            'attacking_volume': float(attacking_volume),
+            'avg_possession_pct': float(avg_possession),
+            'avg_passes_per_game': float(avg_passes),
+            'avg_long_balls_per_game': float(avg_long_balls),
+            'avg_crosses_per_game': float(avg_crosses),
+            'avg_tackles_per_game': float(avg_tackles),
+            'avg_fouls_per_game': float(avg_fouls),
+            'matches_analyzed': int(len(df))
         }
     
     def calculate_league_style_profile(self, league_id: int, season_year: int) -> Optional[Dict]:
@@ -121,23 +143,40 @@ class StyleProfiler:
         # Average across all teams
         df = pd.DataFrame(team_profiles)
         
+        # Helper function to safely get mean, handling NaN/inf
+        def safe_mean(series):
+            if len(series) == 0:
+                return None
+            mean_val = series.mean()
+            if pd.isna(mean_val) or np.isinf(mean_val):
+                return None
+            return float(mean_val)
+        
+        def safe_sum(series):
+            if len(series) == 0:
+                return 0
+            sum_val = series.sum()
+            if pd.isna(sum_val) or np.isinf(sum_val):
+                return 0
+            return int(sum_val)
+        
         league_profile = {
             'entity_type': 'league',
             'entity_id': league_id,
             'season_year': season_year,
-            'possession_focus': df['possession_focus'].mean(),
-            'direct_play_index': df['direct_play_index'].mean(),
-            'crossing_frequency': df['crossing_frequency'].mean(),
-            'defensive_intensity': df['defensive_intensity'].mean(),
-            'physical_intensity': df['physical_intensity'].mean(),
-            'attacking_volume': df['attacking_volume'].mean(),
-            'avg_possession_pct': df['avg_possession_pct'].mean(),
-            'avg_passes_per_game': df['avg_passes_per_game'].mean(),
-            'avg_long_balls_per_game': df['avg_long_balls_per_game'].mean(),
-            'avg_crosses_per_game': df['avg_crosses_per_game'].mean(),
-            'avg_tackles_per_game': df['avg_tackles_per_game'].mean(),
-            'avg_fouls_per_game': df['avg_fouls_per_game'].mean(),
-            'matches_analyzed': df['matches_analyzed'].sum()
+            'possession_focus': safe_mean(df['possession_focus']),
+            'direct_play_index': safe_mean(df['direct_play_index']),
+            'crossing_frequency': safe_mean(df['crossing_frequency']),
+            'defensive_intensity': safe_mean(df['defensive_intensity']),
+            'physical_intensity': safe_mean(df['physical_intensity']),
+            'attacking_volume': safe_mean(df['attacking_volume']),
+            'avg_possession_pct': safe_mean(df['avg_possession_pct']),
+            'avg_passes_per_game': safe_mean(df['avg_passes_per_game']),
+            'avg_long_balls_per_game': safe_mean(df['avg_long_balls_per_game']),
+            'avg_crosses_per_game': safe_mean(df['avg_crosses_per_game']),
+            'avg_tackles_per_game': safe_mean(df['avg_tackles_per_game']),
+            'avg_fouls_per_game': safe_mean(df['avg_fouls_per_game']),
+            'matches_analyzed': safe_sum(df['matches_analyzed'])
         }
         
         return league_profile
@@ -181,27 +220,38 @@ class StyleProfiler:
         """
         cluster_names = {}
         
+        # Get overall means for comparison
+        overall_means = df[features].mean()
+        
         for cluster_id in df['style_cluster_id'].unique():
             cluster_df = df[df['style_cluster_id'] == cluster_id]
+            cluster_means = cluster_df[features].mean()
             
-            avg_values = cluster_df[features].mean()
+            # Find top 2-3 distinguishing features (highest deviation from overall mean)
+            deviations = {}
+            for feature in features:
+                # Calculate standardized deviation
+                std = df[feature].std()
+                if std > 0:
+                    deviation = (cluster_means[feature] - overall_means[feature]) / std
+                    deviations[feature] = deviation
             
-            # Simple heuristic naming
-            if avg_values['possession_focus'] > 55:
-                if avg_values['attacking_volume'] > 60:
-                    name = "Possession Dominant"
-                else:
-                    name = "Possession Conservative"
-            elif avg_values['direct_play_index'] > 15:
-                name = "Direct/Counter-Attack"
-            elif avg_values['defensive_intensity'] > 70:
-                name = "High Press Aggressive"
-            elif avg_values['crossing_frequency'] > 60:
-                name = "Wide/Crossing Focus"
+            # Sort by absolute deviation
+            top_features = sorted(deviations.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+            
+            # Build descriptive name
+            descriptors = []
+            for feature, deviation in top_features:
+                if abs(deviation) > 0.5:  # Only include significant deviations
+                    level = "High" if deviation > 0 else "Low"
+                    # Clean up feature name
+                    feature_name = feature.replace('_', ' ').title()
+                    descriptors.append(f"{level} {feature_name}")
+            
+            if descriptors:
+                cluster_names[cluster_id] = " | ".join(descriptors)
             else:
-                name = "Balanced"
-            
-            cluster_names[cluster_id] = name
+                cluster_names[cluster_id] = f"Cluster {cluster_id + 1}"
         
         return cluster_names
     
@@ -213,6 +263,7 @@ class StyleProfiler:
         cursor = self.conn.cursor()
         
         for profile in profiles:
+            profile = self._convert_to_python_types(profile)
             # Check if exists
             cursor.execute("""
                 SELECT id FROM [dbo].[style_profiles]
