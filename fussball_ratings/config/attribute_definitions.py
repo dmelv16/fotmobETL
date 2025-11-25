@@ -602,6 +602,58 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('rating', 'player_stats', is_optional=True),
         ],
     ),
+
+    'marking': AttributeDefinition(
+        name="Marking",
+        code="MAR",
+        category=AttributeCategory.TECHNICAL,
+        description="Defensive positioning and man-marking ability",
+        min_tier=DataTier.FULL,
+        min_matches=10,
+        calculation_method=CalculationMethod.COMPOSITE,
+        primary_stats=[
+            StatRequirement('interceptions', 'player_stats'),
+            StatRequirement('clearances', 'player_stats'),
+            StatRequirement('blocks', 'player_stats', is_optional=True),
+        ],
+        secondary_stats=[
+            StatRequirement('dribbled_past', 'player_stats', is_optional=True),  # Inverse
+        ],
+        applicable_positions=[PositionGroup.DEFENDER],
+        higher_is_better=True,  # dribbled_past handled inversely in composite
+    ),
+
+    'penalties': AttributeDefinition(
+        name="Penalty Taking",
+        code="PEN",
+        category=AttributeCategory.TECHNICAL,
+        description="Penalty kick conversion",
+        min_tier=DataTier.COMPLETE,
+        min_matches=5,  # Low because penalties are rare
+        calculation_method=CalculationMethod.COMPOSITE,
+        primary_stats=[
+            StatRequirement('situation', 'match_shotmap'),  # Filter: 'Penalty'
+            StatRequirement('event_type', 'match_shotmap'),  # Goal/Miss/Saved
+        ],
+        exclude_positions=[PositionGroup.GOALKEEPER],
+    ),
+
+    'long_passing': AttributeDefinition(
+        name="Long Passing",
+        code="LPA",
+        category=AttributeCategory.TECHNICAL,
+        description="Accuracy and effectiveness of long-range distribution",
+        min_tier=DataTier.FULL,
+        min_matches=8,
+        calculation_method=CalculationMethod.PERCENTAGE,
+        primary_stats=[
+            StatRequirement('accurate_long_balls', 'player_stats'),
+            StatRequirement('long_balls', 'player_stats', is_optional=True),
+        ],
+        secondary_stats=[
+            StatRequirement('passes_into_final_third', 'player_stats', is_optional=True),
+        ],
+    ),
 }
 
 

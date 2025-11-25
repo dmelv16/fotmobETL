@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Set
 import logging
-
+from collections import defaultdict
 from config.constants import DataTier, PositionGroup, get_position_group
 from models.entities import (
     Player, Coach, Team, League, EntityRegistry
@@ -52,6 +52,9 @@ class LoadedMatchData:
     # Coaches
     coaches: List[Dict[str, Any]] = field(default_factory=list)
     
+    # Unavailable players (for injury tracking)
+    unavailable_players: List[Dict[str, Any]] = field(default_factory=list)
+    
     # Competition context
     league_info: Optional[Dict[str, Any]] = None
     competition_type: str = "League"
@@ -84,6 +87,7 @@ class CoachMatchStats:
     team_id: int
     is_home_team: bool
     data_tier: DataTier
+    match_date: Optional[datetime] = None
     
     # Resolved team stats (neutral keys)
     team_stats: Dict[str, Any] = field(default_factory=dict)
@@ -92,6 +96,13 @@ class CoachMatchStats:
     formation: Optional[str] = None
     lineup_player_ids: List[int] = field(default_factory=list)
     substitutions: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Player ratings for development tracking
+    player_ratings: Dict[int, float] = field(default_factory=dict)
+    player_ages: Dict[int, int] = field(default_factory=dict)
+    
+    # Goal events with timing for adaptability
+    goal_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -108,6 +119,11 @@ class TeamMatchStats:
     # Additional context
     opponent_team_id: Optional[int] = None
     opponent_rating: Optional[float] = None
+    
+    # Lineup data for squad depth
+    lineup_player_ids: List[int] = field(default_factory=list)
+    starter_player_ids: List[int] = field(default_factory=list)
+    sub_player_ids: List[int] = field(default_factory=list)
 
 
 class MatchDataLoader:
@@ -165,6 +181,8 @@ class MatchDataLoader:
         if availability.has_lineups:
             loaded.lineups = self.player_q.get_match_lineup(match_id)
             loaded.coaches = self.coach_q.get_match_coaches(match_id)
+            # Load unavailable players for injury tracking
+            loaded.unavailable_players = self.match_q.get_unavailable_players(match_id)
         
         if availability.has_stats:
             loaded.team_stats_summary = self.match_q.get_match_stats_summary(match_id)
@@ -298,10 +316,19 @@ class MatchProcessor:
                     all_stat_keys.update(stats.keys())
                 self.stat_tracker.record_match_stats(loaded.match_id, all_stat_keys)
             
-            # Collect stats for attribute calculation
-            player_match_stats = self._collect_player_match_stats(loaded, context)
-            coach_match_stats = self._collect_coach_match_stats(loaded, home_context, away_context)
-            team_match_stats = self._collect_team_match_stats(loaded, home_context, away_context)
+            # Collect stats for attribute calculation - pass both contexts
+            player_match_stats = self._collect_player_match_stats(
+                loaded, context, home_context, away_context
+            )
+            coach_match_stats = self._collect_coach_match_stats(
+                loaded, home_context, away_context
+            )
+            team_match_stats = self._collect_team_match_stats(
+                loaded, home_context, away_context
+            )
+            
+            # Collect shotmap stats
+            shotmap_stats = self._collect_shotmap_stats(loaded)
             
             result['success'] = True
             result['entities_updated']['teams'] = 2
@@ -310,6 +337,7 @@ class MatchProcessor:
             result['player_match_stats'] = player_match_stats
             result['coach_match_stats'] = coach_match_stats
             result['team_match_stats'] = team_match_stats
+            result['shotmap_stats'] = shotmap_stats
             result['rating_updates'] = updates
             
         except Exception as e:
@@ -349,7 +377,7 @@ class MatchProcessor:
         # Get player stats for this team's players
         lineup_player_ids = {p.get('player_id') for p in lineup if p.get('player_id')}
         player_stats = {
-            pid: stats for pid, stats in loaded.player_stats.items()
+            pid: pstats for pid, pstats in loaded.player_stats.items()
             if pid in lineup_player_ids
         }
         
@@ -540,10 +568,36 @@ class MatchProcessor:
                     return self.registry.get_or_create_coach(coach_id, coach_name)
         return None
     
+    def _check_player_injured(
+        self, 
+        player_id: int, 
+        loaded: LoadedMatchData
+    ) -> bool:
+        """Check if player was marked as injured/unavailable for this match."""
+        for unavailable in loaded.unavailable_players:
+            if unavailable.get('player_id') == player_id:
+                # Has injury_id means injured (not suspended or other)
+                if unavailable.get('injury_id') is not None:
+                    return True
+        return False
+    
+    def _get_player_injury_id(
+        self, 
+        player_id: int, 
+        loaded: LoadedMatchData
+    ) -> Optional[int]:
+        """Get injury_id if player was injured for this match."""
+        for unavailable in loaded.unavailable_players:
+            if unavailable.get('player_id') == player_id:
+                return unavailable.get('injury_id')
+        return None
+    
     def _collect_player_match_stats(
         self,
         loaded: LoadedMatchData,
-        context: MatchContext
+        context: MatchContext,
+        home_context: TeamMatchContext,
+        away_context: TeamMatchContext
     ) -> List[PlayerMatchStats]:
         """Collect player match stats for attribute engine."""
         stats_list = []
@@ -560,6 +614,14 @@ class MatchProcessor:
                 player_id, loaded, lineup_row.get('is_starter', False)
             )
             
+            # Get the appropriate context based on which team the player is on
+            if is_home:
+                own_context = home_context
+                opp_context = away_context
+            else:
+                own_context = away_context
+                opp_context = home_context
+            
             pms = PlayerMatchStats(
                 match_id=loaded.match_id,
                 player_id=player_id,
@@ -570,7 +632,16 @@ class MatchProcessor:
                 position_id=lineup_row.get('position_id'),
                 is_starter=lineup_row.get('is_starter', False),
                 rating=lineup_row.get('rating'),
-                is_home_team=is_home  # Added!
+                is_home_team=is_home,
+                # Context fields - now properly populated
+                league_id=loaded.match_details.get('league_id'),
+                league_name=loaded.match_details.get('league_name'),
+                country_code=loaded.league_info.get('CountryName') if loaded.league_info else None,
+                own_team_rating=own_context.stats.get('team_rating'),
+                opponent_team_rating=opp_context.stats.get('team_rating'),
+                match_result=own_context.stats.get('result'),
+                was_injured=self._check_player_injured(player_id, loaded),
+                injury_id=self._get_player_injury_id(player_id, loaded),
             )
             stats_list.append(pms)
         
@@ -585,22 +656,88 @@ class MatchProcessor:
         """Collect coach stats with resolved home/away data."""
         stats_list = []
         
-        for context in [home_context, away_context]:
-            if context.coach_id:
+        # Extract goal events for adaptability calculation
+        goal_events = [
+            {
+                'minute': e.get('time_minute', 0),
+                'is_home_goal': e.get('is_home_team', False),
+                'home_score_before': e.get('home_score_before', 0),
+                'away_score_before': e.get('away_score_before', 0),
+                'home_score_after': e.get('home_score_after', 0),
+                'away_score_after': e.get('away_score_after', 0),
+                'is_own_goal': e.get('own_goal', False),
+            }
+            for e in loaded.events
+            if e.get('event_type', '').lower() == 'goal'
+        ]
+        
+        for team_context in [home_context, away_context]:
+            if team_context.coach_id:
+                # Build player ratings and ages from lineup
+                player_ratings = {}
+                player_ages = {}
+                for p in team_context.lineup:
+                    pid = p.get('player_id')
+                    if pid:
+                        if p.get('rating'):
+                            player_ratings[pid] = p.get('rating')
+                        if p.get('age'):
+                            player_ages[pid] = p.get('age')
+                
+                # Build substitution data with context
+                subs_for_team = []
+                for s in loaded.substitutions:
+                    if s.get('team_id') == team_context.team_id:
+                        sub_minute = s.get('substitution_time', 0)
+                        # Find score at substitution time
+                        score_at_sub = self._get_score_at_minute(
+                            goal_events, sub_minute, team_context.is_home_team
+                        )
+                        subs_for_team.append({
+                            'player_in_id': s.get('player_id') if 'in' in s.get('substitution_type', '').lower() else None,
+                            'minute': sub_minute,
+                            'score_before': score_at_sub,
+                        })
+                
                 cms = CoachMatchStats(
-                    coach_id=context.coach_id,
+                    coach_id=team_context.coach_id,
                     match_id=loaded.match_id,
-                    team_id=context.team_id,
-                    is_home_team=context.is_home_team,
+                    team_id=team_context.team_id,
+                    is_home_team=team_context.is_home_team,
                     data_tier=loaded.data_tier,
-                    team_stats=context.stats,  # Already resolved!
-                    formation=context.stats.get('formation'),
-                    lineup_player_ids=[p.get('player_id') for p in context.lineup if p.get('player_id')],
-                    substitutions=[s for s in loaded.substitutions if s.get('team_id') == context.team_id]
+                    match_date=loaded.match_details.get('match_time_utc'),
+                    team_stats=team_context.stats,
+                    formation=team_context.stats.get('formation'),
+                    lineup_player_ids=[p.get('player_id') for p in team_context.lineup if p.get('player_id')],
+                    substitutions=subs_for_team,
+                    player_ratings=player_ratings,
+                    player_ages=player_ages,
+                    goal_events=goal_events,
                 )
                 stats_list.append(cms)
         
         return stats_list
+    
+    def _get_score_at_minute(
+        self, 
+        goal_events: List[Dict], 
+        minute: int,
+        is_home_team: bool
+    ) -> Tuple[int, int]:
+        """Get (own_score, opponent_score) at a given minute."""
+        own_score = 0
+        opp_score = 0
+        
+        for event in goal_events:
+            if event['minute'] < minute:
+                if is_home_team:
+                    own_score = event['home_score_after']
+                    opp_score = event['away_score_after']
+                else:
+                    own_score = event['away_score_after']
+                    opp_score = event['home_score_after']
+        
+        return (own_score, opp_score)
     
     def _collect_team_match_stats(
         self,
@@ -609,21 +746,52 @@ class MatchProcessor:
         away_context: TeamMatchContext
     ) -> List[TeamMatchStats]:
         """Collect team stats with resolved home/away data."""
-        return [
-            TeamMatchStats(
-                team_id=home_context.team_id,
+        result = []
+        
+        for team_context, opp_context in [
+            (home_context, away_context), 
+            (away_context, home_context)
+        ]:
+            # Get lineup breakdown
+            all_player_ids = [p.get('player_id') for p in team_context.lineup if p.get('player_id')]
+            starter_ids = [p.get('player_id') for p in team_context.lineup 
+                          if p.get('player_id') and p.get('is_starter')]
+            sub_ids = [p.get('player_id') for p in team_context.lineup 
+                      if p.get('player_id') and not p.get('is_starter')]
+            
+            tms = TeamMatchStats(
+                team_id=team_context.team_id,
                 match_id=loaded.match_id,
-                is_home_team=True,
+                is_home_team=team_context.is_home_team,
                 data_tier=loaded.data_tier,
-                stats=home_context.stats,  # Already resolved!
-                opponent_team_id=away_context.team_id
-            ),
-            TeamMatchStats(
-                team_id=away_context.team_id,
-                match_id=loaded.match_id,
-                is_home_team=False,
-                data_tier=loaded.data_tier,
-                stats=away_context.stats,  # Already resolved!
-                opponent_team_id=home_context.team_id
+                stats=team_context.stats,
+                opponent_team_id=opp_context.team_id,
+                opponent_rating=opp_context.stats.get('team_rating'),
+                lineup_player_ids=all_player_ids,
+                starter_player_ids=starter_ids,
+                sub_player_ids=sub_ids,
             )
-        ]
+            result.append(tms)
+        
+        return result
+
+    def _collect_shotmap_stats(self, loaded: LoadedMatchData) -> Dict[int, List[Dict]]:
+        """Group shotmap data by player_id for attribute calculation."""
+        by_player = defaultdict(list)
+        for shot in loaded.shotmap:
+            pid = shot.get('player_id')
+            if pid:
+                by_player[pid].append({
+                    'match_id': loaded.match_id,
+                    'x': shot.get('x'),
+                    'y': shot.get('y'),
+                    'xg': shot.get('expected_goals'),
+                    'is_goal': shot.get('event_type') == 'Goal',
+                    'is_from_inside_box': shot.get('is_from_inside_box'),
+                    'situation': shot.get('situation'),  # 'FreeKick', 'Penalty', 'OpenPlay', etc.
+                    'is_on_target': shot.get('is_on_target'),
+                    'is_blocked': shot.get('is_blocked'),
+                    'shot_type': shot.get('shot_type'),
+                    'minute': shot.get('minute'),
+                })
+        return dict(by_player)

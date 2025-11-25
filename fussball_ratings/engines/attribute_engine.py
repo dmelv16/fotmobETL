@@ -1402,3 +1402,18 @@ class AttributeEngine:
                     if value is not None:
                         per_90 = (value / ms.minutes_played) * 90 if ms.minutes_played > 0 else value
                         self.percentile_calc.record_stat(stat_key, per_90, player.position_group)
+
+    def normalize_by_league_strength(
+        self, 
+        raw_value: float, 
+        player_league_id: int,
+        league_ratings: Dict[int, float],
+        base_league_rating: float = 1000
+    ) -> float:
+        """Adjust attribute value based on league difficulty."""
+        league_rating = league_ratings.get(player_league_id, base_league_rating)
+        multiplier = league_rating / base_league_rating
+        
+        # Soft adjustment: 10% bonus/penalty per 200 rating points difference
+        adjustment = (multiplier - 1) * 0.5
+        return raw_value * (1 + adjustment)

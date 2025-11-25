@@ -170,6 +170,42 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('team_score_conceded', 'match_details'),
         ],
     ),
+
+    'attacking_style': AttributeDefinition(
+        name="Attacking Style",
+        code="AST",
+        category=AttributeCategory.COACH,
+        description="Possession-based vs direct attacking approach",
+        min_tier=DataTier.TEAM_STATS,
+        min_matches=15,
+        calculation_method=CalculationMethod.COMPOSITE,
+        primary_stats=[
+            StatRequirement('possession', 'match_stats_summary'),
+            StatRequirement('opposition_half_passes', 'match_stats_summary'),
+            StatRequirement('own_half_passes', 'match_stats_summary'),
+        ],
+        secondary_stats=[
+            StatRequirement('accurate_long_balls', 'match_stats_summary', is_optional=True),
+            StatRequirement('touches_opp_box', 'match_stats_summary', is_optional=True),
+        ],
+        # Returns: 1-20 where 1=ultra-direct, 20=ultra-possession
+    ),
+
+    'defensive_style': AttributeDefinition(
+        name="Defensive Style",
+        code="DST",
+        category=AttributeCategory.COACH,
+        description="High press vs low block defensive approach",
+        min_tier=DataTier.TEAM_STATS,
+        min_matches=15,
+        calculation_method=CalculationMethod.COMPOSITE,
+        primary_stats=[
+            StatRequirement('tackles', 'match_stats_summary'),
+            StatRequirement('interceptions', 'match_stats_summary'),
+            StatRequirement('possession', 'match_stats_summary'),  # Inverse correlation
+        ],
+        # Returns: 1-20 where 1=deep block, 20=gegenpressing
+    ),
 }
 
 
