@@ -96,8 +96,8 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('total_shots', 'player_stats'),
         ],
         secondary_stats=[
-            StatRequirement('big_chance_missed', 'player_stats', is_optional=True),
-            StatRequirement('shots_on_target', 'player_stats', is_optional=True),
+            StatRequirement('big_chance_missed_title', 'player_stats', is_optional=True),
+            StatRequirement('ShotsOnTarget', 'player_stats', is_optional=True),
         ],
         exclude_positions=[PositionGroup.GOALKEEPER],
         stat_weights={'goals_vs_xg': 0.5, 'conversion_rate': 0.3, 'on_target_rate': 0.2}
@@ -142,7 +142,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         description="Delivery from wide areas",
         min_tier=DataTier.FULL,
         min_matches=8,
-        calculation_method=CalculationMethod.PERCENTAGE,
+        calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('accurate_crosses', 'player_stats'),
             StatRequirement('crosses', 'player_stats', is_optional=True),
@@ -185,7 +185,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('dispossessed', 'player_stats'),
         ],
         secondary_stats=[
-            StatRequirement('big_chance_missed', 'player_stats', is_optional=True),
+            StatRequirement('big_chance_missed_title', 'player_stats', is_optional=True),
         ],
         exclude_positions=[PositionGroup.GOALKEEPER],
         higher_is_better=True,  # Composite considers dispossessed inversely
@@ -295,10 +295,10 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('tackles', 'player_stats', is_optional=True),
         ],
         secondary_stats=[
-            StatRequirement('blocks', 'player_stats', is_optional=True),
+            StatRequirement('shot_blocks', 'player_stats', is_optional=True),
             StatRequirement('clearances', 'player_stats', is_optional=True),
         ],
-        stat_weights={'duel_engagement': 0.5, 'tackles': 0.3, 'blocks': 0.2}
+        stat_weights={'duel_engagement': 0.5, 'tackles': 0.3, 'shot_blocks': 0.2}
     ),
     
     'composure': AttributeDefinition(
@@ -310,7 +310,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=12,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('big_chance_missed', 'player_stats'),
+            StatRequirement('big_chance_missed_title', 'player_stats'),
             StatRequirement('dispossessed', 'player_stats'),
         ],
         secondary_stats=[
@@ -349,7 +349,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('accurate_passes', 'player_stats'),
             StatRequirement('dispossessed', 'player_stats'),
-            StatRequirement('shots_on_target', 'player_stats', is_optional=True),
+            StatRequirement('ShotsOnTarget', 'player_stats', is_optional=True),
         ],
         secondary_stats=[
             StatRequirement('key_passes', 'player_stats', is_optional=True),
@@ -401,6 +401,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('touches_opp_box', 'player_stats', is_optional=True),
             StatRequirement('chances_created', 'player_stats', is_optional=True),
+            StatRequirement('rating', 'player_stats', is_optional=True)
         ],
         secondary_stats=[
             StatRequirement('expected_goals', 'player_stats', is_optional=True),
@@ -418,7 +419,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('interceptions', 'player_stats'),
-            StatRequirement('blocks', 'player_stats', is_optional=True),
+            StatRequirement('shot_blocks', 'player_stats', is_optional=True),
         ],
         secondary_stats=[
             StatRequirement('clearances', 'player_stats', is_optional=True),
@@ -505,7 +506,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         description="Aerial duel ability",
         min_tier=DataTier.FULL,
         min_matches=10,
-        calculation_method=CalculationMethod.PERCENTAGE,
+        calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('aerials_won', 'player_stats'),
             StatRequirement('aerials_lost', 'player_stats', is_optional=True),
@@ -533,7 +534,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         description="Physical duel dominance",
         min_tier=DataTier.FULL,
         min_matches=10,
-        calculation_method=CalculationMethod.PERCENTAGE,
+        calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('duel_won', 'player_stats'),
             StatRequirement('duel_lost', 'player_stats'),
@@ -614,7 +615,7 @@ PLAYER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('interceptions', 'player_stats'),
             StatRequirement('clearances', 'player_stats'),
-            StatRequirement('blocks', 'player_stats', is_optional=True),
+            StatRequirement('shot_blocks', 'player_stats', is_optional=True),
         ],
         secondary_stats=[
             StatRequirement('dribbled_past', 'player_stats', is_optional=True),  # Inverse
@@ -673,7 +674,7 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('saves', 'player_stats'),
-            StatRequirement('saves_from_inside_box', 'player_stats', is_optional=True),
+            StatRequirement('saves_inside_box', 'player_stats', is_optional=True),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -687,9 +688,10 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('big_chances_faced', 'player_stats', is_optional=True),
+            StatRequirement('goals_prevented', 'player_stats', is_optional=True),
             StatRequirement('goals_conceded', 'player_stats'),
             StatRequirement('saves', 'player_stats'),
+            StatRequirement('expected_goals_on_target_faced', 'player_stats', is_optional=True)
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -705,7 +707,7 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('saves', 'player_stats'),
             StatRequirement('goals_conceded', 'player_stats'),
-            StatRequirement('expected_goals_faced', 'player_stats', is_optional=True),
+            StatRequirement('expected_goals_on_target_faced', 'player_stats', is_optional=True),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -717,10 +719,10 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         description="Long distribution",
         min_tier=DataTier.FULL,
         min_matches=10,
-        calculation_method=CalculationMethod.PERCENTAGE,
+        calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('accurate_long_balls', 'player_stats'),
-            StatRequirement('long_balls', 'player_stats', is_optional=True),
+            StatRequirement('long_balls_accurate', 'player_stats'),
+            StatRequirement('accurate_passes', 'player_stats', is_optional=True),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -734,8 +736,8 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('accurate_passes', 'player_stats'),
-            StatRequirement('pass_accuracy', 'player_stats', is_optional=True),
+            StatRequirement('punches', 'player_stats'),
+            StatRequirement('player_throws', 'player_stats'),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -750,6 +752,7 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
             StatRequirement('punches', 'player_stats'),
+            StatRequirement('keeper_high_claim', 'player_stats'),
             StatRequirement('catches', 'player_stats', is_optional=True),
         ],
         secondary_stats=[
@@ -770,6 +773,8 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
             StatRequirement('punches', 'player_stats'),
             StatRequirement('catches', 'player_stats', is_optional=True),
             StatRequirement('clearances', 'player_stats', is_optional=True),
+            StatRequirement('keeper_high_claim', 'player_stats'),
+            StatRequirement('keeper_sweeper', 'player_stats', is_optional=True),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -785,6 +790,7 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('clearances', 'player_stats'),
             StatRequirement('interceptions', 'player_stats', is_optional=True),
+            StatRequirement('keeper_sweeper', 'player_stats', is_optional=True),
         ],
         applicable_positions=[PositionGroup.GOALKEEPER],
     ),
@@ -813,8 +819,8 @@ GOALKEEPER_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('error_led_to_goal', 'player_stats'),
-            StatRequirement('penalty_saves', 'player_stats', is_optional=True),
+            StatRequirement('errors_led_to_goal', 'player_stats'),
+            StatRequirement('saved_penalties', 'player_stats', is_optional=True),
         ],
         higher_is_better=False,  # Fewer errors = better
         applicable_positions=[PositionGroup.GOALKEEPER],

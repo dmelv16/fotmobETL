@@ -260,7 +260,7 @@ POSITION_GROUP_NAMES = {
 # Base competition type multipliers
 COMPETITION_MULTIPLIERS = {
     'Continental': 2.0,      # Base for continental
-    'Cup': 1.25,             # Domestic cups
+    'Cup': 1.05,             # Domestic cups
     'League': 1.0,           # Default for leagues
 }
 
@@ -315,3 +315,14 @@ CONTEXT_REQUIRED_STATS = {
     'expected_goals', 'expected_assists', 'expected_goals_on_target',
     'rating', 'fantasy_score', 'market_value',
 }
+
+# How much weight to give quality adjustment (0 = ignore, 1 = full adjustment)
+QUALITY_ADJUSTMENT_WEIGHT = 0.5
+
+# Reference rating for normalization (roughly "average top-flight" level)
+# This is just a scaling factor, not a hardcoded league rating
+REFERENCE_RATING = 1000
+
+# Minimum rating difference to consider "significant" 
+# (avoids micro-adjustments for similar-quality opponents)
+MIN_RATING_DIFF_THRESHOLD = 50

@@ -489,7 +489,7 @@ class ProcessingPipeline:
             
             coach = self.entity_registry.coaches[coach_id]
             new_attributes = self.attribute_engine.calculate_coach_attributes(
-                coach, stats_history
+                coach, stats_history, league_ratings=league_ratings
             )
             
             if new_attributes:
@@ -518,7 +518,7 @@ class ProcessingPipeline:
             
             team = self.entity_registry.teams[team_id]
             new_attributes = self.attribute_engine.calculate_team_attributes(
-                team, stats_history
+                team, stats_history, league_ratings=league_ratings
             )
             
             if new_attributes:

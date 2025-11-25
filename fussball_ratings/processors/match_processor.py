@@ -765,7 +765,7 @@ class MatchProcessor:
         home_context: TeamMatchContext,
         away_context: TeamMatchContext
     ) -> List[CoachMatchStats]:
-        """Collect coach stats with resolved home/away data."""
+        """Collect coach stats with resolved home/away data INCLUDING opponent_rating."""
         stats_list = []
         
         # Extract goal events for adaptability calculation
@@ -783,7 +783,13 @@ class MatchProcessor:
             if e.get('event_type', '').lower() == 'goal'
         ]
         
-        for team_context in [home_context, away_context]:
+        # Process both teams - pair each with their opponent context
+        team_pairs = [
+            (home_context, away_context),  # home team's opponent is away
+            (away_context, home_context),  # away team's opponent is home
+        ]
+        
+        for team_context, opp_context in team_pairs:
             if team_context.coach_id:
                 # Build player ratings and ages from lineup
                 player_ratings = {}
@@ -801,7 +807,6 @@ class MatchProcessor:
                 for s in loaded.substitutions:
                     if s.get('team_id') == team_context.team_id:
                         sub_minute = s.get('substitution_time', 0)
-                        # Find score at substitution time
                         score_at_sub = self._get_score_at_minute(
                             goal_events, sub_minute, team_context.is_home_team
                         )
@@ -811,6 +816,13 @@ class MatchProcessor:
                             'score_before': score_at_sub,
                         })
                 
+                # Build team_stats with opponent_rating included
+                team_stats_with_opponent = {
+                    **team_context.stats,
+                    'opponent_rating': opp_context.stats.get('team_rating'),  # ← KEY FIX
+                    'league_id': loaded.match_details.get('league_id'),       # Ensure league_id is present
+                }
+                
                 cms = CoachMatchStats(
                     coach_id=team_context.coach_id,
                     match_id=loaded.match_id,
@@ -818,7 +830,7 @@ class MatchProcessor:
                     is_home_team=team_context.is_home_team,
                     data_tier=loaded.data_tier,
                     match_date=loaded.match_details.get('match_time_utc'),
-                    team_stats=team_context.stats,
+                    team_stats=team_stats_with_opponent,  # ← Now includes opponent_rating
                     formation=team_context.stats.get('formation'),
                     lineup_player_ids=[p.get('player_id') for p in team_context.lineup if p.get('player_id')],
                     substitutions=subs_for_team,
