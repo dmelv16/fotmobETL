@@ -170,7 +170,7 @@ class ProcessingPipeline:
                 
                 # Get Tier 4+ matches specifically (not chronological order)
                 bootstrap_match_ids = self._get_bootstrap_matches(limit=1000)
-                logger.info(f"Found {len(bootstrap_match_ids)} Tier 4+ matches for bootstrap")
+                logger.info(f"Found {len(bootstrap_match_ids)} Tier 5+ matches for bootstrap")
                 
                 stats_collected = 0
                 
@@ -265,6 +265,7 @@ class ProcessingPipeline:
             JOIN match_details md ON es.match_id = md.match_id
             WHERE md.finished = 1
             AND es.has_player_stats = 1
+            AND es.has_shotmap = 1
             ORDER BY NEWID()
         """
         results = self.match_queries.executor.execute_query(query, (limit,))
