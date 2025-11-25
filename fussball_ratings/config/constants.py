@@ -129,38 +129,127 @@ class PositionGroup(IntEnum):
     FORWARD = 3
 
 
-# Granular position IDs (usual_position_id) to group mapping
-# You'll need to populate these based on your actual data
+# Granular position IDs (position_id) to group mapping
+# Derived from usual_position_id relationships in match_lineup_players
 POSITION_TO_GROUP = {
-    # Goalkeepers
-    1: PositionGroup.GOALKEEPER,
+    # Goalkeepers (usual_position_id = 0)
+    11: PositionGroup.GOALKEEPER,
+    112: PositionGroup.GOALKEEPER,
+    113: PositionGroup.GOALKEEPER,
+    117: PositionGroup.GOALKEEPER,
+    118: PositionGroup.GOALKEEPER,
     
-    # Defenders
-    2: PositionGroup.DEFENDER,   # CB
-    3: PositionGroup.DEFENDER,   # LB
-    4: PositionGroup.DEFENDER,   # RB
-    5: PositionGroup.DEFENDER,   # LWB
-    6: PositionGroup.DEFENDER,   # RWB
+    # Defenders (usual_position_id = 1)
+    1: PositionGroup.DEFENDER,
+    24: PositionGroup.DEFENDER,
+    27: PositionGroup.DEFENDER,
+    29: PositionGroup.DEFENDER,
+    31: PositionGroup.DEFENDER,
+    32: PositionGroup.DEFENDER,
+    34: PositionGroup.DEFENDER,
+    35: PositionGroup.DEFENDER,
+    36: PositionGroup.DEFENDER,
+    37: PositionGroup.DEFENDER,
+    38: PositionGroup.DEFENDER,
+    39: PositionGroup.DEFENDER,
+    41: PositionGroup.DEFENDER,
+    49: PositionGroup.DEFENDER,
+    51: PositionGroup.DEFENDER,
+    59: PositionGroup.DEFENDER,
+    64: PositionGroup.DEFENDER,
+    67: PositionGroup.DEFENDER,
+    71: PositionGroup.DEFENDER,
+    73: PositionGroup.DEFENDER,
+    81: PositionGroup.DEFENDER,
+    86: PositionGroup.DEFENDER,
+    88: PositionGroup.DEFENDER,
+    105: PositionGroup.DEFENDER,
+    107: PositionGroup.DEFENDER,
     
-    # Midfielders
-    7: PositionGroup.MIDFIELDER,   # CDM
-    8: PositionGroup.MIDFIELDER,   # CM
-    9: PositionGroup.MIDFIELDER,   # CAM
-    10: PositionGroup.MIDFIELDER,  # LM
-    11: PositionGroup.MIDFIELDER,  # RM
+    # Midfielders (usual_position_id = 2)
+    2: PositionGroup.MIDFIELDER,
+    23: PositionGroup.MIDFIELDER,
+    25: PositionGroup.MIDFIELDER,
+    26: PositionGroup.MIDFIELDER,
+    33: PositionGroup.MIDFIELDER,
+    43: PositionGroup.MIDFIELDER,
+    52: PositionGroup.MIDFIELDER,
+    53: PositionGroup.MIDFIELDER,
+    54: PositionGroup.MIDFIELDER,
+    55: PositionGroup.MIDFIELDER,
+    56: PositionGroup.MIDFIELDER,
+    57: PositionGroup.MIDFIELDER,
+    62: PositionGroup.MIDFIELDER,
+    63: PositionGroup.MIDFIELDER,
+    65: PositionGroup.MIDFIELDER,
+    66: PositionGroup.MIDFIELDER,
+    68: PositionGroup.MIDFIELDER,
+    72: PositionGroup.MIDFIELDER,
+    74: PositionGroup.MIDFIELDER,
+    75: PositionGroup.MIDFIELDER,
+    76: PositionGroup.MIDFIELDER,
+    77: PositionGroup.MIDFIELDER,
+    78: PositionGroup.MIDFIELDER,
+    79: PositionGroup.MIDFIELDER,
+    82: PositionGroup.MIDFIELDER,
+    83: PositionGroup.MIDFIELDER,
+    84: PositionGroup.MIDFIELDER,
+    85: PositionGroup.MIDFIELDER,
+    93: PositionGroup.MIDFIELDER,
+    94: PositionGroup.MIDFIELDER,
+    96: PositionGroup.MIDFIELDER,
+    99: PositionGroup.MIDFIELDER,
+    103: PositionGroup.MIDFIELDER,
     
-    # Forwards
-    12: PositionGroup.FORWARD,   # LW
-    13: PositionGroup.FORWARD,   # RW
-    14: PositionGroup.FORWARD,   # CF
-    15: PositionGroup.FORWARD,   # ST
+    # Forwards (usual_position_id = 3)
+    3: PositionGroup.FORWARD,
+    4: PositionGroup.FORWARD,
+    45: PositionGroup.FORWARD,
+    47: PositionGroup.FORWARD,
+    58: PositionGroup.FORWARD,
+    87: PositionGroup.FORWARD,
+    89: PositionGroup.FORWARD,
+    91: PositionGroup.FORWARD,
+    92: PositionGroup.FORWARD,
+    95: PositionGroup.FORWARD,
+    97: PositionGroup.FORWARD,
+    98: PositionGroup.FORWARD,
+    102: PositionGroup.FORWARD,
+    104: PositionGroup.FORWARD,
+    106: PositionGroup.FORWARD,
+    108: PositionGroup.FORWARD,
+    109: PositionGroup.FORWARD,
+    114: PositionGroup.FORWARD,
+    115: PositionGroup.FORWARD,
+    116: PositionGroup.FORWARD,
+    1000: PositionGroup.FORWARD,  # Substitute/special case
 }
 
-# Position names for display
-POSITION_NAMES = {
-    1: 'GK', 2: 'CB', 3: 'LB', 4: 'RB', 5: 'LWB', 6: 'RWB',
-    7: 'CDM', 8: 'CM', 9: 'CAM', 10: 'LM', 11: 'RM',
-    12: 'LW', 13: 'RW', 14: 'CF', 15: 'ST'
+
+def get_position_group(position_id: int, usual_position_id: int = None) -> PositionGroup:
+    """
+    Get position group from position_id, with fallback to usual_position_id.
+    
+    Use this function instead of direct dict lookup to handle unknown position_ids.
+    """
+    # Try granular position_id first
+    if position_id in POSITION_TO_GROUP:
+        return POSITION_TO_GROUP[position_id]
+    
+    # Fallback to usual_position_id if provided
+    if usual_position_id is not None and usual_position_id in (0, 1, 2, 3):
+        return PositionGroup(usual_position_id)
+    
+    # Ultimate fallback: midfielder (most common)
+    return PositionGroup.MIDFIELDER
+
+
+# Position group names for display
+POSITION_GROUP_NAMES = {
+    PositionGroup.GOALKEEPER: 'GK',
+    PositionGroup.DEFENDER: 'DEF',
+    PositionGroup.MIDFIELDER: 'MID',
+    PositionGroup.FORWARD: 'FWD',
 }
 
 
@@ -170,18 +259,18 @@ POSITION_NAMES = {
 
 # Base competition type multipliers
 COMPETITION_MULTIPLIERS = {
-    'Continental': 1.5,      # Base for continental
-    'Cup': 1.15,             # Domestic cups
+    'Continental': 2.0,      # Base for continental
+    'Cup': 1.25,             # Domestic cups
     'League': 1.0,           # Default for leagues
 }
 
 # Specific continental competition adjustments
 CONTINENTAL_ADJUSTMENTS = {
-    'Champions League': 1.8,
-    'Europa League': 1.4,
+    'Champions League': 2.0,
+    'Europa League': 1.6,
     'Conference League': 1.2,
     'Copa Libertadores': 1.6,
-    'AFC Champions League': 1.3,
+    'Copa Sudamericana': 1.3,
 }
 
 # Division level multipliers (applied to League type)

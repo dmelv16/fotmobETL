@@ -1,5 +1,6 @@
 """
 Coach, Team, and League attribute definitions.
+Updated to use side-neutral stat keys - home/away resolution happens in calculators.
 """
 from dataclasses import dataclass, field
 from typing import List, Dict
@@ -25,14 +26,13 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.DIFFERENTIAL,
         primary_stats=[
-            StatRequirement('home_xg', 'match_stats_summary'),
-            StatRequirement('away_xg', 'match_stats_summary'),
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('away_team_score', 'match_details'),
+            # Side-neutral keys - calculator resolves based on is_home_team
+            StatRequirement('xg', 'match_stats_summary'),
+            StatRequirement('team_score', 'match_details'),
         ],
         secondary_stats=[
-            StatRequirement('home_total_shots', 'match_stats_summary', is_optional=True),
-            StatRequirement('home_big_chances', 'match_stats_summary', is_optional=True),
+            StatRequirement('total_shots', 'match_stats_summary', is_optional=True),
+            StatRequirement('big_chances', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -45,10 +45,8 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.DIFFERENTIAL,
         primary_stats=[
-            StatRequirement('home_xg', 'match_stats_summary'),  # Opponent xG
-            StatRequirement('away_xg', 'match_stats_summary'),
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('away_team_score', 'match_details'),
+            StatRequirement('xg_conceded', 'match_stats_summary'),  # Opponent's xG
+            StatRequirement('team_score_conceded', 'match_details'),
         ],
         higher_is_better=False,  # Lower goals/xG conceded = better
     ),
@@ -58,15 +56,15 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         code="ADP",
         category=AttributeCategory.COACH,
         description="Points gained when trailing",
-        min_tier=DataTier.MINIMAL,  # Needs events with time
+        min_tier=DataTier.MINIMAL,
         min_matches=20,
         calculation_method=CalculationMethod.CONTEXTUAL,
         primary_stats=[
             StatRequirement('time_minute', 'match_events'),
-            StatRequirement('home_score_before', 'match_events'),
-            StatRequirement('away_score_before', 'match_events'),
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('away_team_score', 'match_details'),
+            StatRequirement('score_before', 'match_events'),  # Resolved by side
+            StatRequirement('score_after', 'match_events'),
+            StatRequirement('team_score', 'match_details'),
+            StatRequirement('team_score_conceded', 'match_details'),
         ],
     ),
     
@@ -81,6 +79,7 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         primary_stats=[
             StatRequirement('time_minute', 'match_events'),
             StatRequirement('event_type', 'match_events'),
+            StatRequirement('is_home_team', 'match_events'),  # To filter events
         ],
     ),
     
@@ -121,11 +120,11 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.DIFFERENTIAL,
         primary_stats=[
-            StatRequirement('home_yellow_cards', 'match_stats_summary'),
-            StatRequirement('home_red_cards', 'match_stats_summary'),
-            StatRequirement('home_fouls', 'match_stats_summary'),
+            StatRequirement('yellow_cards', 'match_stats_summary'),
+            StatRequirement('red_cards', 'match_stats_summary'),
+            StatRequirement('fouls', 'match_stats_summary'),
         ],
-        higher_is_better=False,  # Fewer cards = better discipline
+        higher_is_better=False,
     ),
     
     'squad_rotation': AttributeDefinition(
@@ -167,8 +166,8 @@ COACH_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.CONTEXTUAL,
         primary_stats=[
             StatRequirement('formation', 'match_team_stats'),
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('away_team_score', 'match_details'),
+            StatRequirement('team_score', 'match_details'),
+            StatRequirement('team_score_conceded', 'match_details'),
         ],
     ),
 }
@@ -189,12 +188,12 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('home_xg', 'match_stats_summary'),
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('home_total_shots', 'match_stats_summary', is_optional=True),
+            StatRequirement('xg', 'match_stats_summary'),
+            StatRequirement('team_score', 'match_details'),
+            StatRequirement('total_shots', 'match_stats_summary', is_optional=True),
         ],
         secondary_stats=[
-            StatRequirement('home_big_chances', 'match_stats_summary', is_optional=True),
+            StatRequirement('big_chances', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -207,8 +206,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('away_xg', 'match_stats_summary'),  # Opponent perspective
-            StatRequirement('away_team_score', 'match_details'),
+            StatRequirement('xg_conceded', 'match_stats_summary'),
+            StatRequirement('team_score_conceded', 'match_details'),
         ],
         higher_is_better=False,
     ),
@@ -222,8 +221,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.AGGREGATE,
         primary_stats=[
-            StatRequirement('home_possession', 'match_stats_summary'),
-            StatRequirement('home_accurate_passes', 'match_stats_summary', is_optional=True),
+            StatRequirement('possession', 'match_stats_summary'),
+            StatRequirement('accurate_passes', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -236,8 +235,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('home_tackles', 'match_stats_summary'),
-            StatRequirement('home_interceptions', 'match_stats_summary', is_optional=True),
+            StatRequirement('tackles', 'match_stats_summary'),
+            StatRequirement('interceptions', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -250,8 +249,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('home_duels_won', 'match_stats_summary'),
-            StatRequirement('home_aerial_duels_won', 'match_stats_summary', is_optional=True),
+            StatRequirement('duels_won', 'match_stats_summary'),
+            StatRequirement('aerial_duels_won', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -264,9 +263,9 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=10,
         calculation_method=CalculationMethod.AGGREGATE,
         primary_stats=[
-            StatRequirement('home_yellow_cards', 'match_stats_summary'),
-            StatRequirement('home_red_cards', 'match_stats_summary'),
-            StatRequirement('home_fouls', 'match_stats_summary'),
+            StatRequirement('yellow_cards', 'match_stats_summary'),
+            StatRequirement('red_cards', 'match_stats_summary'),
+            StatRequirement('fouls', 'match_stats_summary'),
         ],
         higher_is_better=False,
     ),
@@ -280,8 +279,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('home_xg_set_play', 'match_stats_summary'),
-            StatRequirement('home_corners', 'match_stats_summary', is_optional=True),
+            StatRequirement('xg_set_play', 'match_stats_summary'),
+            StatRequirement('corners', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -294,7 +293,7 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=15,
         calculation_method=CalculationMethod.COMPOSITE,
         primary_stats=[
-            StatRequirement('away_xg_set_play', 'match_stats_summary'),
+            StatRequirement('xg_set_play_conceded', 'match_stats_summary'),
         ],
         higher_is_better=False,
     ),
@@ -321,8 +320,8 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=20,
         calculation_method=CalculationMethod.CONTEXTUAL,
         primary_stats=[
-            StatRequirement('home_team_score', 'match_details'),
-            StatRequirement('away_team_score', 'match_details'),
+            StatRequirement('team_score', 'match_details'),
+            StatRequirement('team_score_conceded', 'match_details'),
         ],
     ),
     
@@ -343,7 +342,7 @@ TEAM_ATTRIBUTES: Dict[str, AttributeDefinition] = {
 
 
 # =============================================================================
-# LEAGUE ATTRIBUTES
+# LEAGUE ATTRIBUTES (Unchanged - leagues aggregate both sides)
 # =============================================================================
 
 LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
@@ -354,9 +353,9 @@ LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         category=AttributeCategory.LEAGUE,
         description="Competitive quality",
         min_tier=DataTier.MINIMAL,
-        min_matches=100,  # League needs many matches
+        min_matches=100,
         calculation_method=CalculationMethod.AGGREGATE,
-        primary_stats=[],  # Derived from team ratings
+        primary_stats=[],
     ),
     
     'league_depth': AttributeDefinition(
@@ -367,7 +366,7 @@ LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_tier=DataTier.MINIMAL,
         min_matches=100,
         calculation_method=CalculationMethod.CONTEXTUAL,
-        primary_stats=[],  # Std deviation of team ratings
+        primary_stats=[],
     ),
     
     'league_attacking': AttributeDefinition(
@@ -379,9 +378,11 @@ LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         min_matches=100,
         calculation_method=CalculationMethod.AGGREGATE,
         primary_stats=[
+            # Leagues use both sides (total goals in league)
             StatRequirement('home_team_score', 'match_details'),
             StatRequirement('away_team_score', 'match_details'),
             StatRequirement('home_xg', 'match_stats_summary', is_optional=True),
+            StatRequirement('away_xg', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -395,7 +396,9 @@ LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.AGGREGATE,
         primary_stats=[
             StatRequirement('home_fouls', 'match_stats_summary'),
+            StatRequirement('away_fouls', 'match_stats_summary'),
             StatRequirement('home_duels_won', 'match_stats_summary', is_optional=True),
+            StatRequirement('away_duels_won', 'match_stats_summary', is_optional=True),
         ],
     ),
     
@@ -409,6 +412,7 @@ LEAGUE_ATTRIBUTES: Dict[str, AttributeDefinition] = {
         calculation_method=CalculationMethod.AGGREGATE,
         primary_stats=[
             StatRequirement('home_pass_accuracy_pct', 'match_stats_summary'),
+            StatRequirement('away_pass_accuracy_pct', 'match_stats_summary'),
             StatRequirement('home_possession', 'match_stats_summary'),
         ],
     ),

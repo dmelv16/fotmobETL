@@ -67,6 +67,9 @@ class AttributeDefinition:
     
     # Weights for composite calculations
     stat_weights: Dict[str, float] = field(default_factory=dict)
+    
+    # Extended description for complex calculations
+    description_extended: Optional[str] = None
 
 
 # =============================================================================

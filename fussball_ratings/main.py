@@ -38,7 +38,7 @@ def get_db_config() -> DatabaseConfig:
     """Get database configuration."""
     # In production, load from environment or config file
     return DatabaseConfig(
-        server="localhost",  # Update with your server
+        server="DESKTOP-J9IV3OH",  # Update with your server
         database="fussballDB",
         trusted_connection=True
     )

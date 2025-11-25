@@ -13,7 +13,9 @@ from models.entities import EntityRegistry, Player
 from processors.data_handlers import StatKeyTracker
 from processors.match_processor import MatchDataLoader, MatchProcessor, LoadedMatchData
 from engines.rating_engine import RatingEngine
-from engines.attribute_engine import AttributeEngine, PlayerMatchStats
+from engines.attribute_engine import (
+    AttributeEngine, PlayerMatchStats, CoachMatchStats, TeamMatchStats
+)
 from database.connection import ConnectionManager, DatabaseConfig
 from database.queries.match_queries import MatchQueries, LeagueQueries
 from database.queries.player_queries import PlayerQueries, CoachQueries
@@ -132,6 +134,8 @@ class ProcessingPipeline:
         
         # Stats collection for attribute calculation
         self.player_stats_history: Dict[int, List[PlayerMatchStats]] = defaultdict(list)
+        self.coach_stats_history: Dict[int, List[CoachMatchStats]] = defaultdict(list)
+        self.team_stats_history: Dict[int, List[TeamMatchStats]] = defaultdict(list)
         
         # Pipeline stats
         self.stats = PipelineStats()
@@ -249,6 +253,16 @@ class ProcessingPipeline:
                 for pms in result['player_match_stats']:
                     self.player_stats_history[pms.player_id].append(pms)
             
+            # Collect coach stats for attributes
+            if self.config.process_attributes and 'coach_match_stats' in result:
+                for cms in result['coach_match_stats']:
+                    self.coach_stats_history[cms.coach_id].append(cms)
+            
+            # Collect team stats for attributes
+            if self.config.process_attributes and 'team_match_stats' in result:
+                for tms in result['team_match_stats']:
+                    self.team_stats_history[tms.team_id].append(tms)
+            
             # Mark as processed
             self.state_repo.mark_match_processed(match_id, 'ratings', True)
         else:
@@ -259,18 +273,20 @@ class ProcessingPipeline:
                                                   '; '.join(result.get('errors', [])))
     
     def _recalculate_attributes(self):
-        """Recalculate attributes for all players with sufficient data."""
-        logger.info("Recalculating player attributes...")
+        """Recalculate attributes for all entities with sufficient data."""
+        logger.info("Recalculating attributes...")
         
         players_updated = 0
+        coaches_updated = 0
+        teams_updated = 0
         
+        # Player attributes
         for player_id, stats_history in self.player_stats_history.items():
             if player_id not in self.entity_registry.players:
                 continue
             
             player = self.entity_registry.players[player_id]
             
-            # Calculate attributes
             new_attributes = self.attribute_engine.calculate_player_attributes(
                 player, stats_history
             )
@@ -281,7 +297,41 @@ class ProcessingPipeline:
                 }
                 players_updated += 1
         
-        logger.info(f"Updated attributes for {players_updated} players")
+        # Coach attributes
+        for coach_id, stats_history in self.coach_stats_history.items():
+            if coach_id not in self.entity_registry.coaches:
+                continue
+            
+            coach = self.entity_registry.coaches[coach_id]
+            
+            new_attributes = self.attribute_engine.calculate_coach_attributes(
+                coach, stats_history
+            )
+            
+            if new_attributes:
+                coach.attributes = {
+                    code: score for code, score in new_attributes.items()
+                }
+                coaches_updated += 1
+        
+        # Team attributes
+        for team_id, stats_history in self.team_stats_history.items():
+            if team_id not in self.entity_registry.teams:
+                continue
+            
+            team = self.entity_registry.teams[team_id]
+            
+            new_attributes = self.attribute_engine.calculate_team_attributes(
+                team, stats_history
+            )
+            
+            if new_attributes:
+                team.attributes = {
+                    code: score for code, score in new_attributes.items()
+                }
+                teams_updated += 1
+        
+        logger.info(f"Updated attributes: {players_updated} players, {coaches_updated} coaches, {teams_updated} teams")
     
     def _save_state(self):
         """Save current state to database."""
@@ -346,6 +396,28 @@ class ProcessingPipeline:
                     for code, score in player.attributes.items()
                 }
                 self.attribute_repo.save_player_attributes_batch(player_id, attrs_dict)
+        
+        # Save coach attributes
+        for coach_id, coach in self.entity_registry.coaches.items():
+            if coach.attributes:
+                for code, score in coach.attributes.items():
+                    self.attribute_repo.save_coach_attribute(
+                        coach_id=coach_id,
+                        attribute_code=code,
+                        value=score.value,
+                        matches_used=score.matches_used
+                    )
+        
+        # Save team attributes
+        for team_id, team in self.entity_registry.teams.items():
+            if team.attributes:
+                for code, score in team.attributes.items():
+                    self.attribute_repo.save_team_attribute(
+                        team_id=team_id,
+                        attribute_code=code,
+                        value=score.value,
+                        matches_used=score.matches_used
+                    )
         
         logger.info("State saved")
     
