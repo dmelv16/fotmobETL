@@ -137,6 +137,8 @@ class ProcessingPipeline:
         self.coach_stats_history: Dict[int, List[CoachMatchStats]] = defaultdict(list)
         self.team_stats_history: Dict[int, List[TeamMatchStats]] = defaultdict(list)
         
+        self.last_processed_match_date: Optional[datetime] = None
+
         # Pipeline stats
         self.stats = PipelineStats()
     
@@ -333,6 +335,11 @@ class ProcessingPipeline:
             self.stats.matches_skipped += 1
             return
         
+        # Track the match date for league rating updates
+        match_date = loaded.match_details.get('match_time_utc')
+        if match_date:
+            self.last_processed_match_date = match_date
+        
         # Process match
         result = self.match_processor.process_match(loaded)
         
@@ -402,9 +409,12 @@ class ProcessingPipeline:
             variance = sum((r - avg_team_rating) ** 2 for r in team_ratings) / len(team_ratings)
             std_dev = math.sqrt(variance)
             
-            # Get current season (approximate)
+            # FIX: Use the last processed match date, not current date
             from utils.helpers import get_season_year
-            season_year = get_season_year(datetime.now())
+            if self.last_processed_match_date:
+                season_year = get_season_year(self.last_processed_match_date)
+            else:
+                season_year = get_season_year(datetime.now())  # Fallback only
             
             # Save to database
             self.rating_repo.save_league_rating(
