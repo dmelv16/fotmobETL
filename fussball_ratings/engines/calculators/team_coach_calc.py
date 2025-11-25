@@ -7,44 +7,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 import math
-
+from processors.match_processor import CoachMatchStats, TeamMatchStats
 from config.constants import DataTier, ATTR_MIN, ATTR_MAX, MIN_MATCHES_FOR_ATTR
 from config.coach_team_attributes import COACH_ATTRIBUTES, TEAM_ATTRIBUTES
 from config.attribute_definitions import AttributeDefinition, CalculationMethod
 from models.entities import Coach, Team, AttributeScore
-
-
-@dataclass
-class CoachMatchStats:
-    """Stats collected for a coach from a single match."""
-    coach_id: int
-    match_id: int
-    team_id: int
-    is_home_team: bool
-    data_tier: DataTier
-    
-    # Pre-resolved team stats (neutral keys like 'xg', 'possession')
-    team_stats: Dict[str, Any] = field(default_factory=dict)
-    
-    formation: Optional[str] = None
-    lineup_player_ids: List[int] = field(default_factory=list)
-    substitutions: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class TeamMatchStats:
-    """Stats collected for a team from a single match."""
-    team_id: int
-    match_id: int
-    is_home_team: bool
-    data_tier: DataTier
-    
-    # Pre-resolved stats (neutral keys)
-    stats: Dict[str, Any] = field(default_factory=dict)
-    
-    opponent_team_id: Optional[int] = None
-    opponent_rating: Optional[float] = None
-
 
 class CoachAttributeCalculator:
     """

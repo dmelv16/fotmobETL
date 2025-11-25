@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple, Set
 import logging
 from collections import defaultdict
-from config.constants import DataTier, PositionGroup, get_position_group
+from config.constants import DataTier, PositionGroup, get_position_group, BASE_RATING
 from models.entities import (
     Player, Coach, Team, League, EntityRegistry
 )
@@ -19,7 +19,6 @@ from processors.stat_resolver import StatResolver, TeamMatchStatsBuilder, SideCo
 from database.queries.match_queries import MatchQueries, LeagueQueries
 from database.queries.player_queries import PlayerQueries, CoachQueries
 from engines.rating_engine import MatchContext, RatingEngine, MatchRatingProcessor
-from engines.attribute_engine import PlayerMatchStats
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +77,40 @@ class TeamMatchContext:
     coach_id: Optional[int] = None
     coach_name: Optional[str] = None
 
+@dataclass
+class PlayerMatchStats:
+    """Stats for a single player in a single match."""
+    match_id: int
+    player_id: int
+    team_id: int
+    data_tier: DataTier
+    minutes_played: int = 0
+    
+    stats: Dict[str, float] = field(default_factory=dict)
+    
+    position_id: Optional[int] = None
+    position_group: PositionGroup = PositionGroup.MIDFIELDER  # NEW: Added!
+    usual_position_id: Optional[int] = None
+    is_starter: bool = False
+    is_captain: bool = False  # NEW: Added!
+    rating: Optional[float] = None
+    is_home_team: bool = False
+    
+    league_id: Optional[int] = None
+    league_name: Optional[str] = None
+    country_code: Optional[str] = None
+    
+    own_team_rating: Optional[float] = None
+    opponent_team_rating: Optional[float] = None
+    
+    team_score: Optional[int] = None
+    opponent_score: Optional[int] = None
+    match_result: Optional[str] = None
+    
+    was_injured: bool = False
+    injury_id: Optional[int] = None
+    
+    match_date: Optional[datetime] = None  # NEW: Added for time-based calcs
 
 @dataclass 
 class CoachMatchStats:
@@ -463,7 +496,18 @@ class MatchProcessor:
                 continue
             
             player_name = lineup_row.get('player_name', f'Player {player_id}')
+            
+            # Get or create player
             player = self.registry.get_or_create_player(player_id, player_name)
+            
+            # ⭐ INITIALIZE IF NEW PLAYER (rating == BASE_RATING means uninitialized)
+            if player.current_rating == BASE_RATING and player.matches_played == 0:
+                self._initialize_player_rating(
+                    player,
+                    league_id=loaded.match_details.get('league_id'),
+                    team_rating=team_context.stats.get('team_rating'),
+                    team_id=team_context.team_id
+                )
             
             # Update metadata
             position_id = lineup_row.get('position_id')
@@ -489,6 +533,46 @@ class MatchProcessor:
             players.append((player, minutes, performance))
         
         return players
+    
+    def _initialize_player_rating(
+        self,
+        player: Player,
+        league_id: Optional[int],
+        team_rating: Optional[float],
+        team_id: int
+    ) -> None:
+        """
+        Initialize a new player's rating based on context.
+        Called the first time we encounter a player in any match.
+        """
+        from config.constants import BASE_RATING, INIT_MULTIPLIERS
+        
+        # Priority 1: Use team rating (most accurate context)
+        if team_rating and team_rating > 0:
+            base = team_rating
+        
+        # Priority 2: Use league rating
+        elif league_id and league_id in self.registry.leagues:
+            base = self.registry.leagues[league_id].current_rating
+        
+        # Priority 3: Fall back to base rating
+        else:
+            base = BASE_RATING
+        
+        # Apply position-based multiplier
+        # Players typically start slightly below their team/league rating
+        multiplier = INIT_MULTIPLIERS.get(
+            'goalkeeper' if player.is_goalkeeper else 'player',
+            0.85  # 85% of team/league rating
+        )
+        
+        player.current_rating = base * multiplier
+        
+        # Log for debugging
+        logger.debug(
+            f"Initialized player {player.id} ({player.name}) at rating {player.current_rating:.0f} "
+            f"(base: {base:.0f}, multiplier: {multiplier})"
+        )
     
     def _calculate_minutes_played(
         self,
@@ -599,7 +683,9 @@ class MatchProcessor:
         home_context: TeamMatchContext,
         away_context: TeamMatchContext
     ) -> List[PlayerMatchStats]:
-        """Collect player match stats for attribute engine."""
+        """Collect player match stats with ALL required fields populated."""
+        from config.constants import get_position_group
+        
         stats_list = []
         
         for lineup_row in loaded.lineups:
@@ -608,19 +694,40 @@ class MatchProcessor:
                 continue
             
             is_home = lineup_row.get('is_home_team', False)
-            stats = loaded.player_stats.get(player_id, {})
+            player_stats = loaded.player_stats.get(player_id, {})
+            
+            # Determine team context
+            if is_home:
+                own_context = home_context
+                opp_context = away_context
+                team_score = loaded.match_details.get('home_team_score', 0)
+                opp_score = loaded.match_details.get('away_team_score', 0)
+            else:
+                own_context = away_context
+                opp_context = home_context
+                team_score = loaded.match_details.get('away_team_score', 0)
+                opp_score = loaded.match_details.get('home_team_score', 0)
+            
+            # Calculate match result
+            if team_score > opp_score:
+                match_result = 'W'
+            elif team_score < opp_score:
+                match_result = 'L'
+            else:
+                match_result = 'D'
+            
+            # Get position group
+            position_id = lineup_row.get('position_id')
+            usual_position_id = lineup_row.get('usual_position_id')
+            position_group = get_position_group(position_id or 0, usual_position_id)
             
             minutes = self._calculate_minutes_played(
                 player_id, loaded, lineup_row.get('is_starter', False)
             )
             
-            # Get the appropriate context based on which team the player is on
-            if is_home:
-                own_context = home_context
-                opp_context = away_context
-            else:
-                own_context = away_context
-                opp_context = home_context
+            # Add is_captain to stats dict for leadership calculation
+            if lineup_row.get('is_captain'):
+                player_stats['is_captain'] = True
             
             pms = PlayerMatchStats(
                 match_id=loaded.match_id,
@@ -628,20 +735,25 @@ class MatchProcessor:
                 team_id=lineup_row.get('team_id', 0),
                 data_tier=loaded.data_tier,
                 minutes_played=minutes,
-                stats=stats,
-                position_id=lineup_row.get('position_id'),
+                stats=player_stats,
+                position_id=position_id,
+                position_group=position_group,  # NOW POPULATED!
+                usual_position_id=usual_position_id,
                 is_starter=lineup_row.get('is_starter', False),
+                is_captain=lineup_row.get('is_captain', False),
                 rating=lineup_row.get('rating'),
                 is_home_team=is_home,
-                # Context fields - now properly populated
                 league_id=loaded.match_details.get('league_id'),
                 league_name=loaded.match_details.get('league_name'),
                 country_code=loaded.league_info.get('CountryName') if loaded.league_info else None,
                 own_team_rating=own_context.stats.get('team_rating'),
                 opponent_team_rating=opp_context.stats.get('team_rating'),
-                match_result=own_context.stats.get('result'),
+                team_score=team_score,
+                opponent_score=opp_score,
+                match_result=match_result,
                 was_injured=self._check_player_injured(player_id, loaded),
                 injury_id=self._get_player_injury_id(player_id, loaded),
+                match_date=loaded.match_details.get('match_time_utc'),
             )
             stats_list.append(pms)
         
