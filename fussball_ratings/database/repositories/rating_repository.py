@@ -1,8 +1,10 @@
 """
 Repository classes for persisting ratings and attributes to the database.
+Writes to BOTH current tables (fast lookups) AND history tables (change tracking).
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import uuid
 
 from database.connection import QueryExecutor
 
@@ -208,10 +210,22 @@ class RatingRepository:
 
 
 class AttributeRepository:
-    """Repository for entity attributes."""
+    """
+    Repository for entity attributes.
+    Writes to BOTH current tables (fast lookups) AND history tables (change tracking).
+    """
     
     def __init__(self, executor: QueryExecutor):
         self.executor = executor
+    
+    # =========================================================================
+    # BATCH ID GENERATION
+    # =========================================================================
+    
+    @staticmethod
+    def generate_batch_id() -> str:
+        """Generate a unique batch ID for grouping attribute calculations."""
+        return str(uuid.uuid4())
     
     # =========================================================================
     # PLAYER ATTRIBUTES
@@ -224,11 +238,28 @@ class AttributeRepository:
         value: float,
         confidence: float,
         matches_used: int,
-        data_tiers_used: str  # JSON array
+        data_tiers_used: str,
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
     ):
-        """Save or update a player attribute."""
-        # Use MERGE for upsert
-        query = """
+        """Save a single player attribute to BOTH current and history tables."""
+        
+        # 1. Insert into HISTORY table
+        history_query = """
+            INSERT INTO player_attribute_history 
+                (player_id, attribute_code, value, confidence, 
+                 matches_used, data_tiers_used, calculation_batch_id,
+                 trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        self.executor.execute_non_query(
+            history_query,
+            (player_id, attribute_code, value, confidence,
+             matches_used, data_tiers_used, batch_id, trigger_match_id)
+        )
+        
+        # 2. Upsert into CURRENT table
+        current_query = """
             MERGE INTO player_attributes AS target
             USING (SELECT ? as player_id, ? as attribute_code) AS source
             ON target.player_id = source.player_id 
@@ -242,30 +273,133 @@ class AttributeRepository:
                 VALUES (?, ?, ?, ?, ?, ?, GETDATE(), GETDATE());
         """
         self.executor.execute_non_query(
-            query,
-            (player_id, attribute_code, value, confidence, matches_used,
-             data_tiers_used, player_id, attribute_code, value, confidence,
-             matches_used, data_tiers_used)
+            current_query,
+            (player_id, attribute_code,
+             value, confidence, matches_used, data_tiers_used,
+             player_id, attribute_code, value, confidence, matches_used, data_tiers_used)
         )
     
     def save_player_attributes_batch(
-        self, 
-        player_id: int, 
-        attributes: Dict[str, Dict]
+        self,
+        player_id: int,
+        attributes: Dict[str, Dict],
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
     ):
-        """Save multiple attributes for a player."""
+        """Save multiple attributes for a player to BOTH current and history tables."""
+        
+        # 1. Bulk insert into HISTORY table
+        history_query = """
+            INSERT INTO player_attribute_history 
+                (player_id, attribute_code, value, confidence, 
+                 matches_used, data_tiers_used, calculation_batch_id,
+                 trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        history_params = [
+            (player_id, attr_code,
+             attr_data['value'],
+             attr_data['confidence'],
+             attr_data['matches_used'],
+             str(attr_data.get('data_tiers_used', [])),
+             batch_id,
+             trigger_match_id)
+            for attr_code, attr_data in attributes.items()
+        ]
+        self.executor.execute_many(history_query, history_params)
+        
+        # 2. Upsert each into CURRENT table
+        current_query = """
+            MERGE INTO player_attributes AS target
+            USING (SELECT ? as player_id, ? as attribute_code) AS source
+            ON target.player_id = source.player_id 
+               AND target.attribute_code = source.attribute_code
+            WHEN MATCHED THEN
+                UPDATE SET value = ?, confidence = ?, matches_used = ?,
+                           data_tiers_used = ?, updated_at = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (player_id, attribute_code, value, confidence, 
+                        matches_used, data_tiers_used, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, GETDATE(), GETDATE());
+        """
         for attr_code, attr_data in attributes.items():
-            self.save_player_attribute(
-                player_id=player_id,
-                attribute_code=attr_code,
-                value=attr_data['value'],
-                confidence=attr_data['confidence'],
-                matches_used=attr_data['matches_used'],
-                data_tiers_used=str(attr_data.get('data_tiers_used', []))
+            tiers_str = str(attr_data.get('data_tiers_used', []))
+            self.executor.execute_non_query(
+                current_query,
+                (player_id, attr_code,
+                 attr_data['value'], attr_data['confidence'],
+                 attr_data['matches_used'], tiers_str,
+                 player_id, attr_code,
+                 attr_data['value'], attr_data['confidence'],
+                 attr_data['matches_used'], tiers_str)
             )
     
+    def save_all_player_attributes_batch(
+        self,
+        all_attributes: Dict[int, Dict[str, Dict]],
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
+    ):
+        """
+        Bulk save attributes for many players at once.
+        Writes to BOTH current and history tables.
+        """
+        if not all_attributes:
+            return
+        
+        # 1. Bulk insert ALL into HISTORY table
+        history_query = """
+            INSERT INTO player_attribute_history 
+                (player_id, attribute_code, value, confidence, 
+                 matches_used, data_tiers_used, calculation_batch_id,
+                 trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        history_params = []
+        for player_id, attributes in all_attributes.items():
+            for attr_code, attr_data in attributes.items():
+                history_params.append((
+                    player_id, attr_code,
+                    attr_data['value'],
+                    attr_data['confidence'],
+                    attr_data['matches_used'],
+                    str(attr_data.get('data_tiers_used', [])),
+                    batch_id,
+                    trigger_match_id
+                ))
+        
+        if history_params:
+            self.executor.execute_many(history_query, history_params)
+        
+        # 2. Upsert ALL into CURRENT table
+        current_query = """
+            MERGE INTO player_attributes AS target
+            USING (SELECT ? as player_id, ? as attribute_code) AS source
+            ON target.player_id = source.player_id 
+               AND target.attribute_code = source.attribute_code
+            WHEN MATCHED THEN
+                UPDATE SET value = ?, confidence = ?, matches_used = ?,
+                           data_tiers_used = ?, updated_at = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (player_id, attribute_code, value, confidence, 
+                        matches_used, data_tiers_used, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, GETDATE(), GETDATE());
+        """
+        for player_id, attributes in all_attributes.items():
+            for attr_code, attr_data in attributes.items():
+                tiers_str = str(attr_data.get('data_tiers_used', []))
+                self.executor.execute_non_query(
+                    current_query,
+                    (player_id, attr_code,
+                     attr_data['value'], attr_data['confidence'],
+                     attr_data['matches_used'], tiers_str,
+                     player_id, attr_code,
+                     attr_data['value'], attr_data['confidence'],
+                     attr_data['matches_used'], tiers_str)
+                )
+    
     def get_player_attributes(self, player_id: int) -> Dict[str, Dict]:
-        """Get all attributes for a player."""
+        """Get current attributes for a player (from current table - fast)."""
         query = """
             SELECT attribute_code, value, confidence, matches_used,
                    data_tiers_used, updated_at
@@ -285,13 +419,64 @@ class AttributeRepository:
             for r in results
         }
     
+    def get_player_attribute_history(
+        self,
+        player_id: int,
+        attribute_code: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get history of a specific attribute for a player."""
+        query = f"""
+            SELECT TOP {limit} value, confidence, matches_used,
+                   calculation_batch_id, trigger_match_id, calculated_at
+            FROM player_attribute_history
+            WHERE player_id = ? AND attribute_code = ?
+            ORDER BY calculated_at DESC
+        """
+        return self.executor.execute_query(query, (player_id, attribute_code))
+    
+    def get_player_attributes_at_date(
+        self,
+        player_id: int,
+        as_of_date: datetime
+    ) -> Dict[str, Dict]:
+        """Get player attributes as they were at a specific date."""
+        query = """
+            WITH ranked AS (
+                SELECT 
+                    attribute_code, value, confidence, matches_used,
+                    data_tiers_used, calculated_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY attribute_code 
+                        ORDER BY calculated_at DESC
+                    ) as rn
+                FROM player_attribute_history
+                WHERE player_id = ? AND calculated_at <= ?
+            )
+            SELECT attribute_code, value, confidence, matches_used,
+                   data_tiers_used, calculated_at
+            FROM ranked WHERE rn = 1
+        """
+        results = self.executor.execute_query(query, (player_id, as_of_date))
+        
+        return {
+            r['attribute_code']: {
+                'value': r['value'],
+                'confidence': r['confidence'],
+                'matches_used': r['matches_used'],
+                'data_tiers_used': r['data_tiers_used'],
+                'calculated_at': r['calculated_at']
+            }
+            for r in results
+        }
+    
     def get_attribute_leaderboard(
-        self, 
-        attribute_code: str, 
+        self,
+        attribute_code: str,
         limit: int = 100,
         min_confidence: float = 0.5
     ) -> List[Dict[str, Any]]:
-        """Get top players for a specific attribute."""
+        """Get top players for a specific attribute (uses current table)."""
         query = f"""
             SELECT TOP {limit} pa.player_id, pa.value, pa.confidence,
                    mlp.player_name, mlp.usual_position_id
@@ -316,10 +501,26 @@ class AttributeRepository:
         team_id: int,
         attribute_code: str,
         value: float,
-        matches_used: int
+        matches_used: int,
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
     ):
-        """Save or update a team attribute."""
-        query = """
+        """Save a single team attribute to BOTH current and history tables."""
+        
+        # 1. Insert into HISTORY table
+        history_query = """
+            INSERT INTO team_attribute_history 
+                (team_id, attribute_code, value, matches_used,
+                 calculation_batch_id, trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        self.executor.execute_non_query(
+            history_query,
+            (team_id, attribute_code, value, matches_used, batch_id, trigger_match_id)
+        )
+        
+        # 2. Upsert into CURRENT table
+        current_query = """
             MERGE INTO team_attributes AS target
             USING (SELECT ? as team_id, ? as attribute_code) AS source
             ON target.team_id = source.team_id 
@@ -327,18 +528,63 @@ class AttributeRepository:
             WHEN MATCHED THEN
                 UPDATE SET value = ?, matches_used = ?, updated_at = GETDATE()
             WHEN NOT MATCHED THEN
-                INSERT (team_id, attribute_code, value, matches_used, 
+                INSERT (team_id, attribute_code, value, matches_used,
                         created_at, updated_at)
                 VALUES (?, ?, ?, ?, GETDATE(), GETDATE());
         """
         self.executor.execute_non_query(
-            query,
-            (team_id, attribute_code, value, matches_used,
+            current_query,
+            (team_id, attribute_code,
+             value, matches_used,
              team_id, attribute_code, value, matches_used)
         )
     
+    def save_team_attributes_batch(
+        self,
+        team_id: int,
+        attributes: Dict[str, Dict],
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
+    ):
+        """Save multiple team attributes to BOTH current and history tables."""
+        
+        # 1. Bulk insert into HISTORY table
+        history_query = """
+            INSERT INTO team_attribute_history 
+                (team_id, attribute_code, value, matches_used,
+                 calculation_batch_id, trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        history_params = [
+            (team_id, attr_code, attr_data['value'], attr_data['matches_used'],
+             batch_id, trigger_match_id)
+            for attr_code, attr_data in attributes.items()
+        ]
+        self.executor.execute_many(history_query, history_params)
+        
+        # 2. Upsert each into CURRENT table
+        current_query = """
+            MERGE INTO team_attributes AS target
+            USING (SELECT ? as team_id, ? as attribute_code) AS source
+            ON target.team_id = source.team_id 
+               AND target.attribute_code = source.attribute_code
+            WHEN MATCHED THEN
+                UPDATE SET value = ?, matches_used = ?, updated_at = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (team_id, attribute_code, value, matches_used,
+                        created_at, updated_at)
+                VALUES (?, ?, ?, ?, GETDATE(), GETDATE());
+        """
+        for attr_code, attr_data in attributes.items():
+            self.executor.execute_non_query(
+                current_query,
+                (team_id, attr_code,
+                 attr_data['value'], attr_data['matches_used'],
+                 team_id, attr_code, attr_data['value'], attr_data['matches_used'])
+            )
+    
     def get_team_attributes(self, team_id: int) -> Dict[str, Dict]:
-        """Get all attributes for a team."""
+        """Get current attributes for a team (from current table - fast)."""
         query = """
             SELECT attribute_code, value, matches_used, updated_at
             FROM team_attributes
@@ -355,6 +601,53 @@ class AttributeRepository:
             for r in results
         }
     
+    def get_team_attribute_history(
+        self,
+        team_id: int,
+        attribute_code: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get history of a specific attribute for a team."""
+        query = f"""
+            SELECT TOP {limit} value, matches_used,
+                   calculation_batch_id, trigger_match_id, calculated_at
+            FROM team_attribute_history
+            WHERE team_id = ? AND attribute_code = ?
+            ORDER BY calculated_at DESC
+        """
+        return self.executor.execute_query(query, (team_id, attribute_code))
+    
+    def get_team_attributes_at_date(
+        self,
+        team_id: int,
+        as_of_date: datetime
+    ) -> Dict[str, Dict]:
+        """Get team attributes as they were at a specific date."""
+        query = """
+            WITH ranked AS (
+                SELECT 
+                    attribute_code, value, matches_used, calculated_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY attribute_code 
+                        ORDER BY calculated_at DESC
+                    ) as rn
+                FROM team_attribute_history
+                WHERE team_id = ? AND calculated_at <= ?
+            )
+            SELECT attribute_code, value, matches_used, calculated_at
+            FROM ranked WHERE rn = 1
+        """
+        results = self.executor.execute_query(query, (team_id, as_of_date))
+        
+        return {
+            r['attribute_code']: {
+                'value': r['value'],
+                'matches_used': r['matches_used'],
+                'calculated_at': r['calculated_at']
+            }
+            for r in results
+        }
+    
     # =========================================================================
     # COACH ATTRIBUTES
     # =========================================================================
@@ -364,10 +657,26 @@ class AttributeRepository:
         coach_id: int,
         attribute_code: str,
         value: float,
-        matches_used: int
+        matches_used: int,
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
     ):
-        """Save or update a coach attribute."""
-        query = """
+        """Save a single coach attribute to BOTH current and history tables."""
+        
+        # 1. Insert into HISTORY table
+        history_query = """
+            INSERT INTO coach_attribute_history 
+                (coach_id, attribute_code, value, matches_used,
+                 calculation_batch_id, trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        self.executor.execute_non_query(
+            history_query,
+            (coach_id, attribute_code, value, matches_used, batch_id, trigger_match_id)
+        )
+        
+        # 2. Upsert into CURRENT table
+        current_query = """
             MERGE INTO coach_attributes AS target
             USING (SELECT ? as coach_id, ? as attribute_code) AS source
             ON target.coach_id = source.coach_id 
@@ -380,13 +689,58 @@ class AttributeRepository:
                 VALUES (?, ?, ?, ?, GETDATE(), GETDATE());
         """
         self.executor.execute_non_query(
-            query,
-            (coach_id, attribute_code, value, matches_used,
+            current_query,
+            (coach_id, attribute_code,
+             value, matches_used,
              coach_id, attribute_code, value, matches_used)
         )
     
+    def save_coach_attributes_batch(
+        self,
+        coach_id: int,
+        attributes: Dict[str, Dict],
+        batch_id: Optional[str] = None,
+        trigger_match_id: Optional[int] = None
+    ):
+        """Save multiple coach attributes to BOTH current and history tables."""
+        
+        # 1. Bulk insert into HISTORY table
+        history_query = """
+            INSERT INTO coach_attribute_history 
+                (coach_id, attribute_code, value, matches_used,
+                 calculation_batch_id, trigger_match_id, calculated_at)
+            VALUES (?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        history_params = [
+            (coach_id, attr_code, attr_data['value'], attr_data['matches_used'],
+             batch_id, trigger_match_id)
+            for attr_code, attr_data in attributes.items()
+        ]
+        self.executor.execute_many(history_query, history_params)
+        
+        # 2. Upsert each into CURRENT table
+        current_query = """
+            MERGE INTO coach_attributes AS target
+            USING (SELECT ? as coach_id, ? as attribute_code) AS source
+            ON target.coach_id = source.coach_id 
+               AND target.attribute_code = source.attribute_code
+            WHEN MATCHED THEN
+                UPDATE SET value = ?, matches_used = ?, updated_at = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (coach_id, attribute_code, value, matches_used,
+                        created_at, updated_at)
+                VALUES (?, ?, ?, ?, GETDATE(), GETDATE());
+        """
+        for attr_code, attr_data in attributes.items():
+            self.executor.execute_non_query(
+                current_query,
+                (coach_id, attr_code,
+                 attr_data['value'], attr_data['matches_used'],
+                 coach_id, attr_code, attr_data['value'], attr_data['matches_used'])
+            )
+    
     def get_coach_attributes(self, coach_id: int) -> Dict[str, Dict]:
-        """Get all attributes for a coach."""
+        """Get current attributes for a coach (from current table - fast)."""
         query = """
             SELECT attribute_code, value, matches_used, updated_at
             FROM coach_attributes
@@ -402,6 +756,53 @@ class AttributeRepository:
             }
             for r in results
         }
+    
+    def get_coach_attribute_history(
+        self,
+        coach_id: int,
+        attribute_code: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get history of a specific attribute for a coach."""
+        query = f"""
+            SELECT TOP {limit} value, matches_used,
+                   calculation_batch_id, trigger_match_id, calculated_at
+            FROM coach_attribute_history
+            WHERE coach_id = ? AND attribute_code = ?
+            ORDER BY calculated_at DESC
+        """
+        return self.executor.execute_query(query, (coach_id, attribute_code))
+    
+    def get_coach_attributes_at_date(
+        self,
+        coach_id: int,
+        as_of_date: datetime
+    ) -> Dict[str, Dict]:
+        """Get coach attributes as they were at a specific date."""
+        query = """
+            WITH ranked AS (
+                SELECT 
+                    attribute_code, value, matches_used, calculated_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY attribute_code 
+                        ORDER BY calculated_at DESC
+                    ) as rn
+                FROM coach_attribute_history
+                WHERE coach_id = ? AND calculated_at <= ?
+            )
+            SELECT attribute_code, value, matches_used, calculated_at
+            FROM ranked WHERE rn = 1
+        """
+        results = self.executor.execute_query(query, (coach_id, as_of_date))
+        
+        return {
+            r['attribute_code']: {
+                'value': r['value'],
+                'matches_used': r['matches_used'],
+                'calculated_at': r['calculated_at']
+            }
+            for r in results
+        }
 
 
 class ProcessingStateRepository:
@@ -413,7 +814,7 @@ class ProcessingStateRepository:
     def mark_match_processed(
         self,
         match_id: int,
-        processing_type: str,  # 'ratings', 'attributes', 'full'
+        processing_type: str,
         success: bool,
         error_message: Optional[str] = None
     ):
@@ -428,7 +829,7 @@ class ProcessingStateRepository:
         )
     
     def get_unprocessed_matches(
-        self, 
+        self,
         processing_type: str = 'ratings'
     ) -> List[int]:
         """Get matches that haven't been processed yet."""
@@ -444,7 +845,7 @@ class ProcessingStateRepository:
         return [r['match_id'] for r in results]
     
     def get_last_processed_date(
-        self, 
+        self,
         processing_type: str = 'ratings'
     ) -> Optional[datetime]:
         """Get the date of the last processed match."""

@@ -149,8 +149,9 @@ class ProcessingPipeline:
         self.stats = PipelineStats()
         self.stats.start_time = datetime.now()
         
+        last_processed_match_id = None  # ← Move OUTSIDE the loop
+        
         try:
-            
             # Get matches to process
             if match_ids is None:
                 match_ids = self._get_matches_to_process()
@@ -164,22 +165,41 @@ class ProcessingPipeline:
             # STEP 1: Bootstrap phase - collect stats without calculating attributes
             if self.config.process_attributes and not self.attribute_engine._bootstrapped:
                 logger.info("Bootstrapping percentile distributions...")
-                bootstrap_count = min(1000, total_matches // 10)  # Use 10% or 1000 matches
                 
-                for match_id in match_ids[:bootstrap_count]:
+                # Get Tier 4+ matches specifically (not chronological order)
+                bootstrap_match_ids = self._get_bootstrap_matches(limit=1000)
+                logger.info(f"Found {len(bootstrap_match_ids)} Tier 4+ matches for bootstrap")
+                
+                stats_collected = 0
+                
+                for match_id in bootstrap_match_ids:
                     loaded = self.data_loader.load_match(match_id)
                     if loaded and loaded.data_tier.value >= DataTier.FULL.value:
-                        # Just collect stats, don't process ratings yet
-                        context = self.match_processor._build_match_context(loaded)
-                        home_ctx = self.match_processor._build_team_context(loaded, True)
-                        away_ctx = self.match_processor._build_team_context(loaded, False)
-                        
-                        for pms in self.match_processor._collect_player_match_stats(
-                            loaded, context, home_ctx, away_ctx
-                        ):
-                            self.player_stats_history[pms.player_id].append(pms)
+                        try:
+                            context = self.match_processor._build_match_context(loaded)
+                            home_ctx = self.match_processor._build_team_context(loaded, True)
+                            away_ctx = self.match_processor._build_team_context(loaded, False)
+                            
+                            # Create players during bootstrap
+                            for lineup_row in loaded.lineups:
+                                player_id = lineup_row.get('player_id')
+                                if player_id:
+                                    player_name = lineup_row.get('player_name', f'Player {player_id}')
+                                    self.entity_registry.get_or_create_player(player_id, player_name)
+                            
+                            for pms in self.match_processor._collect_player_match_stats(
+                                loaded, context, home_ctx, away_ctx
+                            ):
+                                self.player_stats_history[pms.player_id].append(pms)
+                                stats_collected += 1
+                                
+                        except Exception as e:
+                            logger.debug(f"Bootstrap skip match {match_id}: {e}")
+                            continue
                 
-                # Now bootstrap
+                logger.info(f"Bootstrap collected {stats_collected} player-match stats from {len(self.player_stats_history)} players")
+                
+                # Now bootstrap percentiles
                 self.attribute_engine.bootstrap_percentiles(
                     self.player_stats_history,
                     self.entity_registry.players
@@ -189,6 +209,7 @@ class ProcessingPipeline:
             for i, match_id in enumerate(match_ids):
                 try:
                     self._process_single_match(match_id)
+                    last_processed_match_id = match_id  # ← Updates each iteration
                     
                     # Periodic league rating updates
                     if self.stats.matches_processed > 0 and self.stats.matches_processed % 100 == 0:
@@ -198,11 +219,11 @@ class ProcessingPipeline:
                     if (self.config.process_attributes and 
                         self.stats.matches_processed > 0 and
                         self.stats.matches_processed % self.config.recalculate_attributes_every == 0):
-                        self._recalculate_attributes()
+                        self._recalculate_attributes(trigger_match_id=last_processed_match_id)
                     
-                    # Periodic save
+                    # Periodic save (ratings only)
                     if self.stats.matches_processed % self.config.save_interval == 0:
-                        self._save_state()
+                        self._save_state()  # ← No argument needed
                     
                     # Progress
                     if self.stats.matches_processed % self.config.log_interval == 0:
@@ -219,10 +240,10 @@ class ProcessingPipeline:
             # STEP 3: Final updates
             self._update_league_ratings()
             
-            if self.config.process_attributes:
-                self._recalculate_attributes()
+            if self.config.process_attributes and last_processed_match_id is not None:  # ← Guard check
+                self._recalculate_attributes(trigger_match_id=last_processed_match_id)
             
-            self._save_state()
+            self._save_state()  # ← No argument needed
             
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
@@ -233,6 +254,19 @@ class ProcessingPipeline:
             self._log_final_stats()
         
         return self.stats
+
+    def _get_bootstrap_matches(self, limit: int = 1000) -> List[int]:
+        """Get match IDs with Tier 4+ data for bootstrapping."""
+        query = """
+            SELECT TOP (?) es.match_id
+            FROM extraction_status es
+            JOIN match_details md ON es.match_id = md.match_id
+            WHERE md.finished = 1
+            AND es.has_player_stats = 1
+            ORDER BY NEWID()
+        """
+        results = self.match_queries.executor.execute_query(query, (limit,))
+        return [r['match_id'] for r in results]
 
     def _initialize_existing_players(self) -> None:
         """
@@ -333,8 +367,9 @@ class ProcessingPipeline:
                                                   '; '.join(result.get('errors', [])))
 
     def _update_league_ratings(self) -> None:
-        """Update all league ratings based on their teams."""
+        """Update all league ratings based on their teams and save to database."""
         from collections import defaultdict
+        import math
         
         # Group teams by league
         teams_by_league: Dict[int, List[float]] = defaultdict(list)
@@ -356,15 +391,47 @@ class ProcessingPipeline:
             update = self.rating_engine.update_league_rating(
                 league,
                 team_ratings,
-                continental_results=None  # Add if you track continental performance
+                continental_results=None
             )
             
-            # Apply update
+            # Apply update in memory
             league.current_rating = update.new_rating
+            
+            # Calculate stats for saving
+            avg_team_rating = sum(team_ratings) / len(team_ratings)
+            variance = sum((r - avg_team_rating) ** 2 for r in team_ratings) / len(team_ratings)
+            std_dev = math.sqrt(variance)
+            
+            # Get current season (approximate)
+            from utils.helpers import get_season_year
+            season_year = get_season_year(datetime.now())
+            
+            # Save to database
+            self.rating_repo.save_league_rating(
+                league_id=league_id,
+                rating=update.new_rating,
+                team_count=len(team_ratings),
+                avg_team_rating=avg_team_rating,
+                rating_std_dev=std_dev,
+                season_year=season_year
+            )
+        
+        logger.info(f"Updated {len(teams_by_league)} league ratings")
 
-    def _recalculate_attributes(self) -> None:
-        """Recalculate attributes with league normalization."""
+    def _recalculate_attributes(self, trigger_match_id: Optional[int] = None) -> str:
+        """
+        Recalculate attributes with league normalization and save to both tables.
+        
+        Args:
+            trigger_match_id: The match that triggered this recalculation
+        
+        Returns:
+            batch_id: Unique ID grouping all attributes from this recalculation
+        """
         logger.info("Recalculating attributes...")
+        
+        # Generate batch ID to group this recalculation
+        batch_id = self.attribute_repo.generate_batch_id()
         
         # Get current league ratings
         league_ratings = {
@@ -376,6 +443,9 @@ class ProcessingPipeline:
         coaches_updated = 0
         teams_updated = 0
         
+        # Collect all player attributes for bulk save
+        all_player_attrs: Dict[int, Dict[str, Dict]] = {}
+        
         # Player attributes with normalization
         for player_id, stats_history in self.player_stats_history.items():
             if player_id not in self.entity_registry.players:
@@ -386,12 +456,31 @@ class ProcessingPipeline:
             new_attributes = self.attribute_engine.calculate_player_attributes(
                 player, 
                 stats_history,
-                league_ratings=league_ratings  # Pass league ratings!
+                league_ratings=league_ratings
             )
             
             if new_attributes:
                 player.attributes = new_attributes
                 players_updated += 1
+                
+                # Prepare for bulk save
+                all_player_attrs[player_id] = {
+                    code: {
+                        'value': score.value,
+                        'confidence': score.confidence,
+                        'matches_used': score.matches_used,
+                        'data_tiers_used': [t.value for t in score.data_tiers_used]
+                    }
+                    for code, score in new_attributes.items()
+                }
+        
+        # Bulk save all player attributes (writes to BOTH tables)
+        if all_player_attrs:
+            self.attribute_repo.save_all_player_attributes_batch(
+                all_player_attrs,
+                batch_id=batch_id,
+                trigger_match_id=trigger_match_id
+            )
         
         # Coach attributes
         for coach_id, stats_history in self.coach_stats_history.items():
@@ -406,6 +495,21 @@ class ProcessingPipeline:
             if new_attributes:
                 coach.attributes = new_attributes
                 coaches_updated += 1
+                
+                attrs_dict = {
+                    code: {
+                        'value': score.value,
+                        'matches_used': score.matches_used
+                    }
+                    for code, score in new_attributes.items()
+                }
+                
+                # Save to BOTH tables
+                self.attribute_repo.save_coach_attributes_batch(
+                    coach_id, attrs_dict,
+                    batch_id=batch_id,
+                    trigger_match_id=trigger_match_id
+                )
         
         # Team attributes
         for team_id, stats_history in self.team_stats_history.items():
@@ -420,12 +524,32 @@ class ProcessingPipeline:
             if new_attributes:
                 team.attributes = new_attributes
                 teams_updated += 1
+                
+                attrs_dict = {
+                    code: {
+                        'value': score.value,
+                        'matches_used': score.matches_used
+                    }
+                    for code, score in new_attributes.items()
+                }
+                
+                # Save to BOTH tables
+                self.attribute_repo.save_team_attributes_batch(
+                    team_id, attrs_dict,
+                    batch_id=batch_id,
+                    trigger_match_id=trigger_match_id
+                )
         
-        logger.info(f"Updated: {players_updated} players, {coaches_updated} coaches, {teams_updated} teams")
+        logger.info(
+            f"Recalculated attributes (batch {batch_id[:8]}...): "
+            f"{players_updated} players, {coaches_updated} coaches, {teams_updated} teams"
+        )
+        
+        return batch_id
     
     def _save_state(self):
-        """Save current state to database."""
-        logger.info("Saving state to database...")
+        """Save current state to database. Attributes are saved via _recalculate_attributes."""
+        logger.info("Saving ratings to database...")
         
         # Save player ratings
         player_ratings = []
@@ -473,43 +597,9 @@ class ProcessingPipeline:
                     data_tier=latest.data_tier.value
                 )
         
-        # Save player attributes
-        for player_id, player in self.entity_registry.players.items():
-            if player.attributes:
-                attrs_dict = {
-                    code: {
-                        'value': score.value,
-                        'confidence': score.confidence,
-                        'matches_used': score.matches_used,
-                        'data_tiers_used': [t.value for t in score.data_tiers_used]
-                    }
-                    for code, score in player.attributes.items()
-                }
-                self.attribute_repo.save_player_attributes_batch(player_id, attrs_dict)
+        # NOTE: Attributes are now saved in _recalculate_attributes() with history tracking
         
-        # Save coach attributes
-        for coach_id, coach in self.entity_registry.coaches.items():
-            if coach.attributes:
-                for code, score in coach.attributes.items():
-                    self.attribute_repo.save_coach_attribute(
-                        coach_id=coach_id,
-                        attribute_code=code,
-                        value=score.value,
-                        matches_used=score.matches_used
-                    )
-        
-        # Save team attributes
-        for team_id, team in self.entity_registry.teams.items():
-            if team.attributes:
-                for code, score in team.attributes.items():
-                    self.attribute_repo.save_team_attribute(
-                        team_id=team_id,
-                        attribute_code=code,
-                        value=score.value,
-                        matches_used=score.matches_used
-                    )
-        
-        logger.info("State saved")
+        logger.info("Ratings saved")
     
     def _log_progress(self, current: int, total: int):
         """Log processing progress."""

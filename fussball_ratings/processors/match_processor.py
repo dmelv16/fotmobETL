@@ -726,7 +726,7 @@ class MatchProcessor:
             )
             
             # Add is_captain to stats dict for leadership calculation
-            if lineup_row.get('is_captain'):
+            if lineup_row.get('is_captain', False):
                 player_stats['is_captain'] = True
             
             pms = PlayerMatchStats(
