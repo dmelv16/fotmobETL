@@ -106,9 +106,30 @@ class MatchQualityContext:
         return self.combined_quality / REFERENCE_RATING
     
     @classmethod
+    def from_player_match_stats(
+        cls,
+        pms: 'PlayerMatchStats',
+        league_ratings: Dict[int, float]
+    ) -> 'MatchQualityContext':
+        """Create from PlayerMatchStats - ADD THIS METHOD."""
+        league_rating = REFERENCE_RATING
+        if pms.league_id and pms.league_id in league_ratings:
+            league_rating = league_ratings[pms.league_id]
+        
+        own_rating = pms.own_team_rating or REFERENCE_RATING
+        opponent_rating = pms.opponent_team_rating or REFERENCE_RATING
+        
+        return cls(
+            match_id=pms.match_id,
+            opponent_rating=opponent_rating,
+            league_rating=league_rating,
+            own_rating=own_rating
+        )
+    
+    @classmethod
     def from_coach_match_stats(
         cls,
-        cms: CoachMatchStats,
+        cms: 'CoachMatchStats',
         league_ratings: Dict[int, float]
     ) -> 'MatchQualityContext':
         """Create from CoachMatchStats."""
@@ -127,7 +148,7 @@ class MatchQualityContext:
     @classmethod
     def from_team_match_stats(
         cls,
-        tms: TeamMatchStats,
+        tms: 'TeamMatchStats',
         league_ratings: Dict[int, float]
     ) -> 'MatchQualityContext':
         """Create from TeamMatchStats."""
@@ -142,6 +163,7 @@ class MatchQualityContext:
             league_rating=league_rating,
             own_rating=own_rating
         )
+
 
     
 class PercentileCalculator:
@@ -292,7 +314,7 @@ class BaseAttributeCalculator:
         match_stats: List[PlayerMatchStats],
         position_group: PositionGroup, 
         current_match_count: int,
-        league_ratings: Optional[Dict[int, float]] = None  # NEW: Pass live ratings
+        league_ratings: Optional[Dict[int, float]] = None
     ) -> Optional['AttributeScore']:
         """Override in subclasses."""
         raise NotImplementedError
@@ -323,22 +345,23 @@ class BaseAttributeCalculator:
         match_stat: PlayerMatchStats,
         league_ratings: Optional[Dict[int, float]]
     ) -> MatchQualityContext:
-        """Extract quality context from a match stat."""
+        """Extract quality context from a player match stat."""
         return MatchQualityContext.from_player_match_stats(
             match_stat, 
             league_ratings or {}
         )
 
-
-# =============================================================================
-# UPDATED CONTEXTUAL CALCULATOR - NO MORE PLACEHOLDERS
-# =============================================================================
-
 class ContextualCalculator(BaseAttributeCalculator):
     """Calculate context-dependent attributes with proper implementations."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                  position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
@@ -352,7 +375,11 @@ class ContextualCalculator(BaseAttributeCalculator):
         }
         
         calc_func = calc_map.get(definition.code)
-        return calc_func(definition, match_stats) if calc_func else None
+        if calc_func:
+            if definition.code == 'BIG':
+                return calc_func(definition, match_stats, league_ratings)
+            return calc_func(definition, match_stats)
+        return None
         
     def _calc_consistency(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats]) -> Optional[AttributeScore]:
         ratings = [ms.rating for ms in match_stats if ms.data_tier.value >= definition.min_tier.value and ms.rating]
@@ -361,7 +388,7 @@ class ContextualCalculator(BaseAttributeCalculator):
         if len(ratings) < definition.min_matches:
             return None
         
-        avg = safe_avg(ratings, 7.0)  # Default to average rating
+        avg = safe_avg(ratings, 7.0)
         variance = safe_divide(sum((r - avg) ** 2 for r in ratings), len(ratings), 0.0)
         std_dev = math.sqrt(variance)
         
@@ -490,7 +517,13 @@ class ContextualCalculator(BaseAttributeCalculator):
             data_tiers_used=list(tiers_used)
         )
     
-    def _calc_big_game(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats]) -> Optional[AttributeScore]:
+    def _calc_big_game(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        league_ratings: Optional[Dict[int, float]] = None
+    ) -> Optional[AttributeScore]:
+        """Big game performance - uses league_ratings for better opponent comparison."""
         big_game_ratings = []
         regular_game_ratings = []
         tiers_used = set()
@@ -499,12 +532,21 @@ class ContextualCalculator(BaseAttributeCalculator):
             if ms.rating is None:
                 continue
             tiers_used.add(ms.data_tier)
+            
+            # Determine if "big game" using available ratings
+            is_big_game = False
+            
             if ms.own_team_rating is not None and ms.opponent_team_rating is not None:
+                # Direct comparison from match data
                 rating_diff = ms.opponent_team_rating - ms.own_team_rating
-                if rating_diff > 0.2:
-                    big_game_ratings.append(ms.rating)
-                else:
-                    regular_game_ratings.append(ms.rating)
+                is_big_game = rating_diff > 50  # Opponent rated 50+ higher
+            elif league_ratings and ms.league_id:
+                # Use league rating as proxy for game importance
+                league_rating = league_ratings.get(ms.league_id, REFERENCE_RATING)
+                is_big_game = league_rating > REFERENCE_RATING * 1.1  # Top league
+            
+            if is_big_game:
+                big_game_ratings.append(ms.rating)
             else:
                 regular_game_ratings.append(ms.rating)
         
@@ -573,10 +615,16 @@ class ContextualCalculator(BaseAttributeCalculator):
 # =============================================================================
 
 class InverseCalculator(BaseAttributeCalculator):
-    """Calculate inverse statistics (lower is better, like injuries)."""
+    """Calculate inverse statistics (no quality adjustment needed for injuries)."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                  position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None  # Accept but don't use
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
@@ -1806,43 +1854,73 @@ class TeamAttributeCalculator:
         )
 
 
-# =============================================================================
-# REMAINING CALCULATORS (unchanged from original)
-# =============================================================================
-
 class Per90Calculator(BaseAttributeCalculator):
-    """Calculate per-90-minute statistics."""
+    """Calculate per-90-minute statistics with quality adjustment."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
-        total_actual, total_expected, match_count = 0.0, 0.0, 0
+        total_stat = 0.0
+        total_minutes = 0
+        total_quality = 0.0
+        quality_count = 0
         tiers_used = set()
         
         for ms in match_stats:
             if ms.data_tier.value < definition.min_tier.value:
                 continue
-            
-            actual = self.get_stat_value(ms, definition.primary_stats[0].stat_key, 0.0)
-            if len(definition.primary_stats) <= 1:
+            if ms.minutes_played <= 0:
                 continue
             
-            expected = self.get_stat_value(ms, definition.primary_stats[1].stat_key)
-            if expected is None:
+            stat_value = self.get_stat_value(ms, definition.primary_stats[0].stat_key, 0.0)
+            if stat_value is None:
                 continue
             
-            total_actual += actual
-            total_expected += expected
-            match_count += 1
+            # Get quality context
+            if league_ratings:
+                quality_ctx = self.get_quality_context(ms, league_ratings)
+                adjusted_stat = adjust_stat_for_quality(stat_value, quality_ctx.quality_multiplier)
+                total_quality += quality_ctx.combined_quality
+                quality_count += 1
+            else:
+                adjusted_stat = stat_value
+            
+            total_stat += adjusted_stat
+            total_minutes += ms.minutes_played
             tiers_used.add(ms.data_tier)
         
-        if match_count == 0 or total_expected == 0:
+        if total_minutes == 0:
             return None
         
-        differential = safe_divide(total_actual - total_expected, total_expected, 0.0)
-        percentile = self.percentile_calc.get_percentile(f"{definition.code}_diff", differential, position_group)
+        per_90_value = (total_stat / total_minutes) * 90
+        
+        # Get percentile with quality awareness
+        avg_quality_ctx = None
+        if quality_count > 0:
+            avg_quality = total_quality / quality_count
+            avg_quality_ctx = MatchQualityContext(
+                match_id=0,
+                opponent_rating=avg_quality,
+                league_rating=avg_quality,
+                own_rating=REFERENCE_RATING
+            )
+        
+        percentile = self.percentile_calc.get_percentile(
+            definition.primary_stats[0].stat_key,
+            per_90_value,
+            position_group,
+            avg_quality_ctx
+        )
+        
+        match_count = len([ms for ms in match_stats if ms.data_tier.value >= definition.min_tier.value])
         
         return AttributeScore(
             value=self.percentile_calc.percentile_to_attribute(percentile),
@@ -1854,14 +1932,24 @@ class Per90Calculator(BaseAttributeCalculator):
 
 
 class PercentageCalculator(BaseAttributeCalculator):
-    """Calculate success rate percentages."""
+    """Calculate success rate percentages with quality adjustment."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                  position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
-        total_success, total_attempts, match_count = 0.0, 0.0, 0
+        total_success = 0.0
+        total_attempts = 0.0
+        total_quality = 0.0
+        quality_count = 0
+        match_count = 0
         tiers_used = set()
         
         for ms in match_stats:
@@ -1869,34 +1957,61 @@ class PercentageCalculator(BaseAttributeCalculator):
                 continue
             
             success = self.get_stat_value(ms, definition.primary_stats[0].stat_key, 0.0)
-            attempts = success
+            attempts = success  # Default: success count is the attempts
             
             if len(definition.primary_stats) > 1:
                 attempts_val = self.get_stat_value(ms, definition.primary_stats[1].stat_key)
                 if attempts_val and attempts_val > 0:
                     attempts = attempts_val
             
-            if success is not None and attempts > 0:
-                total_success += success
-                total_attempts += attempts
-                match_count += 1
-                tiers_used.add(ms.data_tier)
+            if success is None or attempts <= 0:
+                continue
+            
+            # Quality adjustment - success rate against better teams is more impressive
+            if league_ratings:
+                quality_ctx = self.get_quality_context(ms, league_ratings)
+                # Boost success value based on opponent quality
+                adjusted_success = adjust_stat_for_quality(success, quality_ctx.quality_multiplier)
+                total_quality += quality_ctx.combined_quality
+                quality_count += 1
+            else:
+                adjusted_success = success
+            
+            total_success += adjusted_success
+            total_attempts += attempts
+            match_count += 1
+            tiers_used.add(ms.data_tier)
         
         if total_attempts == 0:
             return None
         
+        success_rate = total_success / total_attempts
+        
+        # Get percentile with quality awareness
+        avg_quality_ctx = None
+        if quality_count > 0:
+            avg_quality = total_quality / quality_count
+            avg_quality_ctx = MatchQualityContext(
+                match_id=0,
+                opponent_rating=avg_quality,
+                league_rating=avg_quality,
+                own_rating=REFERENCE_RATING
+            )
+        
         percentile = self.percentile_calc.get_percentile(
-            f"{definition.code}_rate", total_success / total_attempts, position_group
+            f"{definition.code}_rate",
+            success_rate,
+            position_group,
+            avg_quality_ctx
         )
         
         return AttributeScore(
             value=self.percentile_calc.percentile_to_attribute(percentile),
-            confidence=min(1.0, match_count / (definition.min_matches * 2)),
+            confidence=min(1.0, safe_divide(match_count, definition.min_matches * 2, 0.0)),
             matches_used=match_count,
             last_updated=datetime.now(),
             data_tiers_used=list(tiers_used)
         )
-
 
 class CompositeCalculator(BaseAttributeCalculator):
     """Calculate attributes from multiple weighted stats - with quality adjustment."""
@@ -1962,7 +2077,7 @@ class CompositeCalculator(BaseAttributeCalculator):
             match_id=0,
             opponent_rating=avg_quality * 0.6 / 0.6,  # Reverse the weighting
             league_rating=avg_quality * 0.4 / 0.4,
-            own_team_rating=REFERENCE_RATING
+            own_rating=REFERENCE_RATING
         )
         
         # Calculate percentile for each stat component
@@ -2021,14 +2136,27 @@ class CompositeCalculator(BaseAttributeCalculator):
 
 
 class DifferentialCalculator(BaseAttributeCalculator):
-    """Calculate based on expected vs actual."""
+    """Calculate based on expected vs actual with quality adjustment."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                  position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
-        total_actual, total_expected, match_count = 0.0, 0.0, 0
+        if len(definition.primary_stats) < 2:
+            return None
+        
+        total_actual = 0.0
+        total_expected = 0.0
+        total_quality = 0.0
+        quality_count = 0
+        match_count = 0
         tiers_used = set()
         
         for ms in match_stats:
@@ -2036,12 +2164,23 @@ class DifferentialCalculator(BaseAttributeCalculator):
                 continue
             
             actual = self.get_stat_value(ms, definition.primary_stats[0].stat_key, 0.0)
-            if len(definition.primary_stats) <= 1:
-                continue
-            
             expected = self.get_stat_value(ms, definition.primary_stats[1].stat_key)
             
-            total_actual += actual
+            if expected is None:
+                continue
+            
+            # Quality adjustment - overperforming xG vs top teams is more impressive
+            if league_ratings:
+                quality_ctx = self.get_quality_context(ms, league_ratings)
+                # Adjust both actual and expected, but actual gets quality boost
+                adjusted_actual = adjust_stat_for_quality(actual, quality_ctx.quality_multiplier)
+                # Expected stays as-is (it's already quality-adjusted by the xG model)
+                total_quality += quality_ctx.combined_quality
+                quality_count += 1
+            else:
+                adjusted_actual = actual
+            
+            total_actual += adjusted_actual
             total_expected += expected
             match_count += 1
             tiers_used.add(ms.data_tier)
@@ -2049,12 +2188,30 @@ class DifferentialCalculator(BaseAttributeCalculator):
         if match_count == 0 or total_expected == 0:
             return None
         
-        differential = (total_actual - total_expected) / total_expected
-        percentile = self.percentile_calc.get_percentile(f"{definition.code}_diff", differential, position_group)
+        # Calculate differential as percentage over/under expected
+        differential = safe_divide(total_actual - total_expected, total_expected, 0.0)
+        
+        # Get percentile with quality awareness
+        avg_quality_ctx = None
+        if quality_count > 0:
+            avg_quality = total_quality / quality_count
+            avg_quality_ctx = MatchQualityContext(
+                match_id=0,
+                opponent_rating=avg_quality,
+                league_rating=avg_quality,
+                own_rating=REFERENCE_RATING
+            )
+        
+        percentile = self.percentile_calc.get_percentile(
+            f"{definition.code}_diff",
+            differential,
+            position_group,
+            avg_quality_ctx
+        )
         
         return AttributeScore(
             value=self.percentile_calc.percentile_to_attribute(percentile),
-            confidence=min(1.0, match_count / (definition.min_matches * 2)),
+            confidence=min(1.0, safe_divide(match_count, definition.min_matches * 2, 0.0)),
             matches_used=match_count,
             last_updated=datetime.now(),
             data_tiers_used=list(tiers_used)
@@ -2062,10 +2219,16 @@ class DifferentialCalculator(BaseAttributeCalculator):
 
 
 class AggregateCalculator(BaseAttributeCalculator):
-    """Calculate aggregate statistics."""
+    """Calculate aggregate statistics (no quality adjustment needed)."""
     
-    def calculate(self, definition: AttributeDefinition, match_stats: List[PlayerMatchStats],
-                  position_group: PositionGroup, current_match_count: int) -> Optional[AttributeScore]:
+    def calculate(
+        self, 
+        definition: AttributeDefinition, 
+        match_stats: List[PlayerMatchStats],
+        position_group: PositionGroup, 
+        current_match_count: int,
+        league_ratings: Optional[Dict[int, float]] = None  # Accept but don't use
+    ) -> Optional[AttributeScore]:
         if not self.has_required_data(definition, match_stats):
             return None
         
